@@ -65,22 +65,26 @@ vllm_image: "vllm/vllm-openai"
 # Закрепленная версия, CUDA 13.0: нужен драйвер 580+ (ветка по умолчанию). Вариант
 # v0.31.0-cu129 не подходит: torchcodec в нем собран под CUDA 13, и vLLM падает при старте.
 vllm_image_tag: "v0.31.0"
-# Модель с Hugging Face. По умолчанию маленькая и без гейта (не нужен HF_TOKEN).
-vllm_model: "Qwen/Qwen2.5-1.5B-Instruct"
+# Модель с Hugging Face: Qwen3.8-27B в официальной FP8-версии, около 31 ГБ весов, нужна GPU
+# от 48 ГБ (FP8 нативно на Ada и Hopper). Полная BF16 "Qwen/Qwen3.8-27B" (около 56 ГБ)
+# требует GPU 80 ГБ. Гейта нет, HF_TOKEN не нужен.
+vllm_model: "Qwen/Qwen3.8-27B-FP8"
 # Имя модели в API (поле "model" в запросах).
-vllm_served_model_name: "qwen2.5-1.5b-instruct"
+vllm_served_model_name: "qwen3.8-27b"
 vllm_dir: "/opt/vllm"
 vllm_hf_cache_dir: "/opt/vllm/hf-cache"
 # Порт на хосте; публикуется только на 127.0.0.1, снаружи доступен через nginx.
 vllm_port: 8000
 vllm_gpu_memory_utilization: 0.90
-vllm_max_model_len: 8192
+vllm_max_model_len: 32768
 vllm_tensor_parallel_size: 1
 # "all" или список индексов через запятую, например "0,1".
 vllm_gpus: "all"
-vllm_extra_args: []
-# Сколько ждать готовности модели (скачивание + загрузка в GPU), секунд.
-vllm_startup_timeout: 900
+# Дополнительные аргументы vLLM. Qwen3.8 по умолчанию сначала размышляет (thinking):
+# парсер отдает размышления отдельным полем reasoning_content, ответ остается в content.
+vllm_extra_args: ["--reasoning-parser", "qwen3"]
+# Сколько ждать готовности модели (скачивание около 31 ГБ + загрузка в GPU), секунд.
+vllm_startup_timeout: 1800
 # Секреты задаются в group_vars/all/vault.yml:
 # vllm_api_key: "..."   обязательно, 16+ символов
 # hf_token: "..."       опционально, для моделей с гейтом
@@ -117,5 +121,8 @@ node_exporter_port: 9100
 # --- Проверка (роль verify) ---
 verify_prompt: "Ответь одним словом: столица Франции?"
 verify_max_tokens: 16
-verify_health_retries: 90
+# Для короткой проверки размышления выключены: иначе Qwen3.8 потратит токены на них.
+verify_chat_template_kwargs: { enable_thinking: false }
+# До 30 минут: первый запуск качает модель.
+verify_health_retries: 180
 verify_health_delay: 10

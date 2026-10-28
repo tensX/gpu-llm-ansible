@@ -65,6 +65,7 @@
               content: "{{ verify_prompt }}"
           max_tokens: "{{ verify_max_tokens | int }}"
           temperature: 0
+          chat_template_kwargs: "{{ verify_chat_template_kwargs }}"
         validate_certs: false
         timeout: 120
         return_content: true

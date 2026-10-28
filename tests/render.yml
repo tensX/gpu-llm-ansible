@@ -13,9 +13,7 @@
     # Не секрет: файл нужен только для проверки синтаксиса compose.
     vllm_api_key: "render-only-not-a-secret"
     hf_token: ""
-    render_vllm_variants:
-      - { name: vllm-all-gpus, gpus: "all", extra_args: [] }
-      - { name: vllm-gpu-list, gpus: "0,1", extra_args: ["--quantization", "awq"], hf_token: "hf_render_only" }
+    render_templates: [docker-compose.yml, vllm.env]
 
   tasks:
     - name: Каталоги вариантов
@@ -23,18 +21,25 @@
         path: "{{ render_dir }}/{{ item }}"
         state: directory
         mode: "0755"
-      loop: "{{ render_vllm_variants | map(attribute='name') | list + ['monitoring'] }}"
+      loop: [vllm-default, vllm-gpu-list, monitoring]
 
-    - name: Шаблоны vLLM
+    - name: Шаблоны vLLM с настройками из group_vars
       ansible.builtin.template:
-        src: "{{ playbook_dir | dirname }}/roles/vllm/templates/{{ item.1 }}.j2"
-        dest: "{{ render_dir }}/{{ item.0.name }}/{{ item.1 }}"
+        src: "{{ playbook_dir | dirname }}/roles/vllm/templates/{{ item }}.j2"
+        dest: "{{ render_dir }}/vllm-default/{{ item }}"
+        mode: "0644"
+      loop: "{{ render_templates }}"
+
+    - name: Шаблоны vLLM со списком GPU, своими аргументами и HF_TOKEN
+      ansible.builtin.template:
+        src: "{{ playbook_dir | dirname }}/roles/vllm/templates/{{ item }}.j2"
+        dest: "{{ render_dir }}/vllm-gpu-list/{{ item }}"
         mode: "0644"
       vars:
-        vllm_gpus: "{{ item.0.gpus }}"
-        vllm_extra_args: "{{ item.0.extra_args }}"
-        hf_token: "{{ item.0.hf_token | default('') }}"
-      loop: "{{ render_vllm_variants | product(['docker-compose.yml', 'vllm.env']) | list }}"
+        vllm_gpus: "0,1"
+        vllm_extra_args: ["--quantization", "awq"]
+        hf_token: "hf_render_only"
+      loop: "{{ render_templates }}"
 
     - name: Шаблон мониторинга
       ansible.builtin.template:
