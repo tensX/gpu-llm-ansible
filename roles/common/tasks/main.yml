@@ -14,9 +14,9 @@
     name: "{{ timezone }}"
 
 # Сначала правило для SSH, потом политика deny и включение: доступ не теряется.
-- name: ufw, SSH (с ограничением частоты подключений)
+- name: Правило ufw для SSH
   community.general.ufw:
-    rule: limit
+    rule: "{{ ssh_ufw_rule }}"
     port: "{{ ssh_port | string }}"
     proto: tcp
 
@@ -24,7 +24,7 @@
   ansible.builtin.set_fact:
     common_gateway_ports: "{{ [gateway_port] + ([gateway_tls_port] if gateway_tls_enabled | bool else []) }}"
 
-- name: ufw, API через nginx (со всех адресов)
+- name: Правило ufw для API через nginx (со всех адресов)
   community.general.ufw:
     rule: allow
     port: "{{ item | string }}"
@@ -32,7 +32,7 @@
   loop: "{{ common_gateway_ports }}"
   when: api_allowed_cidrs | length == 0
 
-- name: ufw, API через nginx (только разрешенные сети)
+- name: Правило ufw для API через nginx (только разрешенные сети)
   community.general.ufw:
     rule: allow
     port: "{{ item.1 | string }}"
@@ -40,7 +40,7 @@
     from_ip: "{{ item.0 }}"
   loop: "{{ api_allowed_cidrs | product(common_gateway_ports) | list }}"
 
-- name: ufw, метрики только из сети мониторинга
+- name: Правило ufw для метрик (только сеть мониторинга)
   community.general.ufw:
     rule: allow
     port: "{{ item.1 | string }}"
@@ -49,7 +49,7 @@
   loop: "{{ metrics_allowed_cidrs | product([dcgm_exporter_port, node_exporter_port]) | list }}"
   when: monitoring_enabled | bool
 
-- name: ufw, входящие по умолчанию закрыты, исходящие открыты
+- name: Политика ufw (входящие закрыты, исходящие открыты)
   community.general.ufw:
     direction: "{{ item.direction }}"
     policy: "{{ item.policy }}"
@@ -57,6 +57,6 @@
     - { direction: incoming, policy: deny }
     - { direction: outgoing, policy: allow }
 
-- name: ufw, включить
+- name: Включить ufw
   community.general.ufw:
     state: enabled

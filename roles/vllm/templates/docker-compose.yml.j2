@@ -6,6 +6,9 @@ services:
     restart: unless-stopped
     ipc: host
     env_file: vllm.env
+    # Модель передается позиционным аргументом "vllm serve <model>": в новых версиях
+    # vLLM это основной способ, вариант с --model устарел.
+    entrypoint: ["vllm", "serve"]
     ports:
       # Только loopback: снаружи API доступен через nginx.
       - "127.0.0.1:{{ vllm_port }}:8000"
@@ -13,7 +16,6 @@ services:
       # Кеш моделей Hugging Face на хосте: при пересоздании контейнера модель не качается заново.
       - "{{ vllm_hf_cache_dir }}:/root/.cache/huggingface"
     command:
-      - "--model"
       - "{{ vllm_model }}"
       - "--served-model-name"
       - "{{ vllm_served_model_name }}"

@@ -9,8 +9,10 @@
       ansible.builtin.assert:
         that:
           - ansible_distribution == "Ubuntu"
-          - ansible_distribution_version in ["22.04", "24.04"]
-        fail_msg: "Поддерживаются Ubuntu 22.04 и 24.04, на хосте {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - ansible_distribution_version in supported_ubuntu_versions
+        fail_msg: >-
+          Поддерживаются Ubuntu {{ supported_ubuntu_versions | join(", ") }},
+          на хосте {{ ansible_distribution }} {{ ansible_distribution_version }}
         quiet: true
       tags: [always]
 
@@ -20,7 +22,12 @@
           - vllm_api_key is defined
           - vllm_api_key | length >= 16
           - "'CHANGE_ME' not in vllm_api_key"
-        fail_msg: "Задайте vllm_api_key (16+ символов) в group_vars/all/vault.yml через ansible-vault, см. README"
+          # Только безопасные символы: ключ попадает в env-файл compose (там $ раскрывается)
+          # и в заголовок Authorization.
+          - vllm_api_key is match('^[A-Za-z0-9._~+/=-]+$')
+        fail_msg: >-
+          Задайте vllm_api_key (16+ символов: буквы, цифры, ._~+/=-) в group_vars/all/vault.yml
+          через ansible-vault, см. README
         quiet: true
       tags: [always]
 
