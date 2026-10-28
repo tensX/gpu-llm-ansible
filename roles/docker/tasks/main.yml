@@ -1,0 +1,85 @@
+---
+- name: Каталог для ключей apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Ключ репозитория Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Репозиторий Docker CE
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+
+- name: Ключ репозитория NVIDIA Container Toolkit
+  ansible.builtin.get_url:
+    url: https://nvidia.github.io/libnvidia-container/gpgkey
+    dest: /etc/apt/keyrings/nvidia-container-toolkit.asc
+    mode: "0644"
+
+- name: Репозиторий NVIDIA Container Toolkit
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.asc]
+      https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
+    filename: nvidia-container-toolkit
+    state: present
+
+- name: Установить Docker CE
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+
+- name: Установить NVIDIA Container Toolkit
+  ansible.builtin.apt:
+    name: >-
+      {{ 'nvidia-container-toolkit=' + nvidia_container_toolkit_version
+         if nvidia_container_toolkit_version else 'nvidia-container-toolkit' }}
+    state: present
+
+- name: Docker в автозапуске
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Проверить, подключен ли runtime nvidia к Docker
+  ansible.builtin.command: grep -q '"nvidia"' /etc/docker/daemon.json
+  register: docker_nvidia_runtime
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Подключить runtime nvidia (nvidia-ctk runtime configure)
+  ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+  when: docker_nvidia_runtime.rc != 0
+  changed_when: true
+  notify: Restart docker
+
+- name: Применить перезапуск Docker до запуска контейнеров
+  ansible.builtin.meta: flush_handlers
+
+- name: Проверить доступ к GPU из контейнера
+  ansible.builtin.command: >-
+    docker run --rm --gpus all --entrypoint nvidia-smi
+    {{ vllm_image }}:{{ vllm_image_tag }} -L
+  register: docker_gpu_test
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [docker_gpu_test]
+
+- name: GPU, видимые в контейнере
+  ansible.builtin.debug:
+    var: docker_gpu_test.stdout_lines
+  when: not ansible_check_mode
+  tags: [docker_gpu_test]

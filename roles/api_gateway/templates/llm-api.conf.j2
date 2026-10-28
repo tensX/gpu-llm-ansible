@@ -1,0 +1,62 @@
+# Managed by Ansible
+{% macro locations() %}
+    client_max_body_size {{ gateway_client_max_body_size }};
+{% for cidr in api_allowed_cidrs %}
+    allow {{ cidr }};
+{% endfor %}
+{% if api_allowed_cidrs | length > 0 %}
+    deny all;
+{% endif %}
+
+    # Проверка живости без ключа (для балансировщика и мониторинга).
+    location = /health {
+        proxy_pass http://127.0.0.1:{{ vllm_port }}/health;
+        access_log off;
+    }
+
+    location /v1/ {
+        # Сам ключ проверяет vLLM; здесь сразу отсекаем запросы без заголовка.
+        if ($http_authorization = "") {
+            return 401;
+        }
+        limit_req zone=llm_api burst={{ gateway_rate_burst }} nodelay;
+
+        proxy_pass http://127.0.0.1:{{ vllm_port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Стриминг ответов (stream=true) без буферизации.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout {{ gateway_read_timeout }};
+        proxy_send_timeout {{ gateway_read_timeout }};
+    }
+
+    # Все остальное (включая /metrics и /docs vLLM) наружу не отдаем.
+    location / {
+        return 404;
+    }
+{% endmacro %}
+server {
+    listen {{ gateway_port }};
+    server_name {{ gateway_server_name }};
+    server_tokens off;
+{% if gateway_tls_enabled | bool %}
+    return 301 https://$host$request_uri;
+}
+
+server {
+    # "listen ... ssl http2" работает и на nginx 1.18 (Ubuntu 22.04), и на 1.24 (24.04).
+    listen {{ gateway_tls_port }} ssl http2;
+    server_name {{ gateway_server_name }};
+    server_tokens off;
+    ssl_certificate {{ gateway_tls_cert }};
+    ssl_certificate_key {{ gateway_tls_key }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:llm_ssl:10m;
+{% endif %}
+{{ locations() }}
+}

@@ -1,0 +1,10 @@
+---
+# Пример файла секретов. Использование:
+#   cp group_vars/all/vault.yml.example group_vars/all/vault.yml
+#   (вписать значения)
+#   ansible-vault encrypt group_vars/all/vault.yml
+#
+# Ключ можно сгенерировать так: openssl rand -hex 32
+vllm_api_key: "CHANGE_ME_generate_with_openssl_rand_hex_32"
+# Нужен только для моделей с гейтом (Llama и т.п.). Для Qwen2.5 не нужен.
+hf_token: ""

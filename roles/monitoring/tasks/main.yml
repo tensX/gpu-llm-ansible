@@ -1,0 +1,43 @@
+---
+- name: Каталог мониторинга
+  ansible.builtin.file:
+    path: "{{ monitoring_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: docker-compose.yml для экспортеров
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ monitoring_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Запустить dcgm-exporter и node_exporter
+  ansible.builtin.command: docker compose up -d --remove-orphans
+  args:
+    chdir: "{{ monitoring_dir }}"
+  register: monitoring_up
+  changed_when: monitoring_up.stderr is regex('(Created|Recreated|Started)')
+  when: not ansible_check_mode
+
+- name: Проверить метрики GPU (dcgm-exporter)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ dcgm_exporter_port }}/metrics"
+    return_content: true
+  register: monitoring_dcgm
+  until: monitoring_dcgm.status == 200 and 'DCGM_FI_DEV_GPU_UTIL' in monitoring_dcgm.content
+  retries: 12
+  delay: 5
+  when: not ansible_check_mode
+
+- name: Проверить метрики хоста (node_exporter)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ node_exporter_port }}/metrics"
+  register: monitoring_node
+  until: monitoring_node.status == 200
+  retries: 6
+  delay: 5
+  when: not ansible_check_mode

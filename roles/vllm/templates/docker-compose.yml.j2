@@ -1,0 +1,54 @@
+# Managed by Ansible
+services:
+  vllm:
+    image: "{{ vllm_image }}:{{ vllm_image_tag }}"
+    container_name: vllm
+    restart: unless-stopped
+    ipc: host
+    env_file: vllm.env
+    ports:
+      # Только loopback: снаружи API доступен через nginx.
+      - "127.0.0.1:{{ vllm_port }}:8000"
+    volumes:
+      # Кеш моделей Hugging Face на хосте: при пересоздании контейнера модель не качается заново.
+      - "{{ vllm_hf_cache_dir }}:/root/.cache/huggingface"
+    command:
+      - "--model"
+      - "{{ vllm_model }}"
+      - "--served-model-name"
+      - "{{ vllm_served_model_name }}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--gpu-memory-utilization"
+      - "{{ vllm_gpu_memory_utilization }}"
+      - "--max-model-len"
+      - "{{ vllm_max_model_len }}"
+      - "--tensor-parallel-size"
+      - "{{ vllm_tensor_parallel_size }}"
+{% for arg in vllm_extra_args %}
+      - "{{ arg }}"
+{% endfor %}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+{% if vllm_gpus | string == 'all' %}
+              count: all
+{% else %}
+              device_ids: {{ vllm_gpus | string | split(',') | map('trim') | list | to_json }}
+{% endif %}
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: {{ vllm_startup_timeout }}s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

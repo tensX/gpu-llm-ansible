@@ -1,0 +1,107 @@
+---
+- name: Проверить, есть ли GPU NVIDIA на шине PCI
+  ansible.builtin.shell: set -o pipefail && lspci -nn | grep -i nvidia
+  args:
+    executable: /bin/bash
+  register: nvidia_pci
+  changed_when: false
+  failed_when: nvidia_pci.rc not in [0, 1]
+  check_mode: false
+
+- name: Остановиться, если GPU NVIDIA нет
+  ansible.builtin.fail:
+    msg: >-
+      GPU NVIDIA не найден (lspci). Для сервера без GPU запускайте
+      с --skip-tags nvidia,vllm,monitoring,verify
+  when: nvidia_pci.rc != 0
+
+- name: Проверить, работает ли драйвер сейчас
+  ansible.builtin.command: nvidia-smi --query-gpu=driver_version --format=csv,noheader
+  register: nvidia_smi_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Заголовки ядра и ubuntu-drivers
+  ansible.builtin.apt:
+    name:
+      - "linux-headers-{{ ansible_kernel }}"
+      - ubuntu-drivers-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Установить рекомендованный драйвер (ubuntu-drivers)
+  ansible.builtin.command: ubuntu-drivers install --gpgpu
+  register: nvidia_install_auto
+  changed_when: true
+  when:
+    - nvidia_driver_version == "auto"
+    - nvidia_smi_before.rc != 0
+
+- name: Имена пакетов драйвера заданной ветки
+  ansible.builtin.set_fact:
+    nvidia_driver_packages:
+      - "nvidia-driver-{{ nvidia_driver_version }}{{ '-' + nvidia_driver_flavor if nvidia_driver_flavor else '' }}"
+      - "nvidia-utils-{{ nvidia_driver_version }}{{ '-' + nvidia_driver_flavor if nvidia_driver_flavor else '' }}"
+  when: nvidia_driver_version != "auto"
+
+- name: Установить драйвер заданной ветки
+  ansible.builtin.apt:
+    name: "{{ nvidia_driver_packages }}"
+    state: present
+  register: nvidia_install_pkg
+  when: nvidia_driver_version != "auto"
+
+- name: Зафиксировать пакеты драйвера (apt hold)
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ nvidia_driver_packages }}"
+  when:
+    - nvidia_driver_version != "auto"
+    - nvidia_driver_hold | bool
+    - not ansible_check_mode
+
+- name: Проверить флаг reboot-required
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: nvidia_reboot_flag
+
+# Перезагрузка нужна, только если драйвер только что поставлен/обновлен
+# или драйвер не отвечал до установки. Повторный прогон ничего не перезагружает.
+- name: Решить, нужна ли перезагрузка
+  ansible.builtin.set_fact:
+    nvidia_need_reboot: >-
+      {{ (nvidia_install_pkg is changed)
+         or (nvidia_install_auto is changed)
+         or (nvidia_smi_before.rc != 0 and nvidia_reboot_flag.stat.exists) }}
+
+- name: Остановиться, если нужна перезагрузка, а она запрещена
+  ansible.builtin.fail:
+    msg: >-
+      Драйвер установлен, нужна перезагрузка. Перезагрузите сервер вручную
+      или задайте nvidia_reboot_allowed=true и запустите плейбук снова.
+  when:
+    - nvidia_need_reboot | bool
+    - not (nvidia_reboot_allowed | bool)
+    - not ansible_check_mode
+
+- name: Перезагрузить сервер после установки драйвера
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ nvidia_reboot_timeout }}"
+    msg: "Reboot after NVIDIA driver install (Ansible)"
+  when:
+    - nvidia_need_reboot | bool
+    - nvidia_reboot_allowed | bool
+
+- name: Проверить драйвер через nvidia-smi
+  ansible.builtin.command: nvidia-smi
+  register: nvidia_smi_after
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Вывод nvidia-smi
+  ansible.builtin.debug:
+    var: nvidia_smi_after.stdout_lines
+  when: not ansible_check_mode
