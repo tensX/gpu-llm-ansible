@@ -11,13 +11,17 @@ common_packages:
   - ufw
   - pciutils
   - python3-apt
-timezone: "UTC"
+# Каноничное имя из tz database, как в образах Ubuntu ("UTC" лишь ссылка на него).
+timezone: "Etc/UTC"
 # Поддерживаемые версии Ubuntu. 26.04 можно добавить, но на ней плейбук не проверялся.
 supported_ubuntu_versions: ["22.04", "24.04"]
 ssh_port: 22
 # "allow" или "limit" (ufw блокирует IP после 6 подключений за 30 секунд).
 # limit безопасен только при ControlPersist: без него Ansible сам упрется в лимит.
 ssh_ufw_rule: "allow"
+# При первом прогоне сбросить ufw (ufw reset): убрать правила, с которыми пришел образ
+# провайдера, например открытый диапазон 3000:10000. Повторные прогоны ufw не сбрасывают.
+ufw_reset_on_first_run: true
 # Откуда разрешен доступ к API (nginx). Пусто = отовсюду.
 api_allowed_cidrs: []
 # Откуда разрешен сбор метрик (адрес Prometheus). Пусто = порты экспортеров закрыты снаружи,
@@ -40,6 +44,9 @@ nvidia_reboot_timeout: 900
 # Зафиксировать пакеты драйвера (apt hold), чтобы unattended-upgrades не обновил
 # драйвер под работающим контейнером.
 nvidia_driver_hold: true
+# Выключить MIG, если он включен (с перезагрузкой): vLLM здесь берет GPU целиком, а при MIG
+# без GPU-инстансов CUDA карту не видит. false = не трогать (MIG-инстанс задать в vllm_gpus).
+nvidia_mig_disable: true
 
 # --- Docker и NVIDIA Container Toolkit (роль docker) ---
 docker_packages:
@@ -50,13 +57,14 @@ docker_packages:
   - docker-compose-plugin
 # Пусто = последняя версия из репозитория NVIDIA, иначе например "1.17.8-1".
 nvidia_container_toolkit_version: ""
-# Образ для проверки GPU в Docker. Версия CUDA та же, что у образа vLLM (12.9).
-docker_gpu_test_image: "nvidia/cuda:12.9.1-base-ubuntu24.04"
+# Образ для проверки GPU в Docker. Версия CUDA та же, что у образа vLLM (13.0.2).
+docker_gpu_test_image: "nvidia/cuda:13.0.2-base-ubuntu24.04"
 
 # --- vLLM (роль vllm) ---
 vllm_image: "vllm/vllm-openai"
-# Закрепленная версия. Вариант cu129 (CUDA 12.9) работает с драйвером 575+.
-vllm_image_tag: "v0.31.0-cu129"
+# Закрепленная версия, CUDA 13.0: нужен драйвер 580+ (ветка по умолчанию). Вариант
+# v0.31.0-cu129 не подходит: torchcodec в нем собран под CUDA 13, и vLLM падает при старте.
+vllm_image_tag: "v0.31.0"
 # Модель с Hugging Face. По умолчанию маленькая и без гейта (не нужен HF_TOKEN).
 vllm_model: "Qwen/Qwen2.5-1.5B-Instruct"
 # Имя модели в API (поле "model" в запросах).

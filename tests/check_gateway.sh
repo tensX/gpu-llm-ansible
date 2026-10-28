@@ -26,18 +26,25 @@ expect() {
   echo "ok: $want ${*: -1}"
 }
 
-# ufw включен, входящие закрыты, порт API открыт.
+# ufw включен, входящие закрыты, правила только плейбука: "правило провайдера"
+# 3000:10000/tcp, добавленное workflow до прогона, снято сбросом ufw.
 ufw_status=$(sudo ufw status verbose)
 echo "$ufw_status"
 check grep -q 'Status: active' <<<"$ufw_status"
 check grep -q 'deny (incoming)' <<<"$ufw_status"
-check grep -qE '^80/tcp +ALLOW IN +Anywhere' <<<"$ufw_status"
+want=$'allow 22/tcp\nallow 80/tcp'
+[ "$TLS" = http ] || want+=$'\nallow 443/tcp'
+added=$(sudo ufw show added | sed -n 's/^ufw //p' | sort)
+if [ "$added" != "$(sort <<<"$want")" ]; then
+  echo "FAIL: правила ufw не совпадают с ожидаемыми: $(tr '\n' ';' <<<"$added")" >&2
+  exit 1
+fi
+echo "ok: в ufw только правила плейбука"
 
 if [ "$TLS" = http ]; then
   base=http://127.0.0.1
 else
   base=https://127.0.0.1
-  check grep -qE '^443/tcp +ALLOW IN +Anywhere' <<<"$ufw_status"
   expect 301 http://127.0.0.1/v1/models
   # Сертификат выписан на домен: curl сверяет имя с subjectAltName.
   check curl -sf --resolve "$domain:443:127.0.0.1" --cacert /etc/ssl/certs/llm-api.crt \

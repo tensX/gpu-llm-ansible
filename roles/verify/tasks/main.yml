@@ -5,13 +5,6 @@
 - name: Проверки после развертывания
   when: not ansible_check_mode
   block:
-    # Тег verify_gpu: в CI без GPU эта задача пропускается (--skip-tags verify_gpu).
-    - name: Запустить nvidia-smi на хосте
-      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv
-      register: verify_smi
-      changed_when: false
-      tags: [verify_gpu]
-
     - name: Ждать готовности vLLM (/health, загрузка модели может идти несколько минут)
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ vllm_port }}/health"
@@ -20,6 +13,14 @@
       until: verify_health.status == 200
       retries: "{{ verify_health_retries }}"
       delay: "{{ verify_health_delay }}"
+
+    # После загрузки модели: в выводе видна память GPU, занятая vLLM.
+    # Тег verify_gpu: в CI без GPU эта задача пропускается (--skip-tags verify_gpu).
+    - name: Запустить nvidia-smi на хосте
+      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv
+      register: verify_smi
+      changed_when: false
+      tags: [verify_gpu]
 
     - name: Схема и порт шлюза
       ansible.builtin.set_fact:

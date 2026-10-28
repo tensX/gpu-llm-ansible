@@ -120,6 +120,12 @@ jobs:
           echo "Заглушка vLLM не запустилась" >&2
           exit 1
 
+      # Как в образах провайдеров: открытый диапазон портов до прогона. Первый прогон его снимет.
+      - name: Правило ufw «от провайдера»
+        run: |
+          if ! command -v ufw >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y -qq ufw; fi
+          sudo ufw allow 3000:10000/tcp
+
       - name: Плейбук
         run: ansible-playbook $PLAYBOOK_ARGS
 

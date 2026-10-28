@@ -23,12 +23,14 @@
   changed_when: monitoring_up.stderr is regex('(Created|Recreated|Started)')
   when: not ansible_check_mode
 
+# Память GPU отдается на любой карте и в любом режиме; DCGM_FI_DEV_GPU_UTIL бывает пустой
+# (например, при включенном MIG), загрузку тогда показывает DCGM_FI_PROF_GR_ENGINE_ACTIVE.
 - name: Проверить метрики GPU (dcgm-exporter)
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ dcgm_exporter_port }}/metrics"
     return_content: true
   register: monitoring_dcgm
-  until: monitoring_dcgm.status == 200 and 'DCGM_FI_DEV_GPU_UTIL' in monitoring_dcgm.content
+  until: monitoring_dcgm.status == 200 and monitoring_dcgm.content is search('^DCGM_FI_DEV_FB_USED[{]', multiline=True)
   retries: 12
   delay: 5
   when: not ansible_check_mode

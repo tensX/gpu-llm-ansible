@@ -13,6 +13,22 @@
   community.general.timezone:
     name: "{{ timezone }}"
 
+# Образы провайдеров бывают со своими правилами ufw, например с открытым диапазоном
+# 3000:10000, куда попадают порты экспортеров. Первый прогон сбрасывает ufw, чтобы
+# снаружи было открыто только описанное ниже; старые правила ufw сохраняет рядом
+# (/etc/ufw/*.rules.<дата>). Повторные прогоны и правила, добавленные позже, не трогаются.
+- name: Проверить, настраивал ли плейбук ufw раньше
+  ansible.builtin.stat:
+    path: /etc/ufw/.ansible-managed
+  register: common_ufw_marker
+
+- name: Сбросить ufw при первом прогоне
+  ansible.builtin.command: ufw --force reset
+  changed_when: true
+  when:
+    - ufw_reset_on_first_run | bool
+    - not common_ufw_marker.stat.exists
+
 # Сначала правило для SSH, потом политика deny и включение: доступ не теряется.
 - name: Правило ufw для SSH
   community.general.ufw:
@@ -60,3 +76,11 @@
 - name: Включить ufw
   community.general.ufw:
     state: enabled
+
+- name: Отметить, что ufw настроен плейбуком
+  ansible.builtin.copy:
+    dest: /etc/ufw/.ansible-managed
+    content: "ufw настроен Ansible (роль common). Пока этот файл есть, плейбук не сбрасывает ufw.\n"
+    owner: root
+    group: root
+    mode: "0644"
