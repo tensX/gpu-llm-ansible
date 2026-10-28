@@ -1,0 +1,5 @@
+---
+# Переменные прогона в CI. Ключ API и настройки TLS добавляет workflow.
+gateway_server_name: "llm.example.test"
+verify_health_retries: 10
+verify_health_delay: 3

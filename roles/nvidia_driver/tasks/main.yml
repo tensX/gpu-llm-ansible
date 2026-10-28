@@ -47,7 +47,7 @@
     - name: Заголовки ядра и ubuntu-drivers
       ansible.builtin.apt:
         name:
-          - "linux-headers-{{ ansible_kernel }}"
+          - "linux-headers-{{ ansible_facts['kernel'] }}"
           - ubuntu-drivers-common
         state: present
         update_cache: true

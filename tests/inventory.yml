@@ -1,0 +1,9 @@
+---
+# Инвентарь для CI: плейбук применяется к самому раннеру GitHub Actions.
+all:
+  children:
+    gpu_servers:
+      hosts:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: /usr/bin/python3

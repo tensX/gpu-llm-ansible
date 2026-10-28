@@ -8,11 +8,11 @@
     - name: Проверить ОС
       ansible.builtin.assert:
         that:
-          - ansible_distribution == "Ubuntu"
-          - ansible_distribution_version in supported_ubuntu_versions
+          - ansible_facts['distribution'] == "Ubuntu"
+          - ansible_facts['distribution_version'] in supported_ubuntu_versions
         fail_msg: >-
           Поддерживаются Ubuntu {{ supported_ubuntu_versions | join(", ") }},
-          на хосте {{ ansible_distribution }} {{ ansible_distribution_version }}
+          на хосте {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
         quiet: true
       tags: [always]
 
