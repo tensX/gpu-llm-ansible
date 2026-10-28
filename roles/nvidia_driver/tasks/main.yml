@@ -125,3 +125,66 @@
   ansible.builtin.debug:
     var: nvidia_driver_smi_after.stdout_lines
   when: not ansible_check_mode
+
+# Режим MIG хранится на самой карте и переживает переустановку ОС и смену арендатора у
+# провайдера. С MIG без GPU-инстансов CUDA не видит карту (cuInit 100), а vLLM здесь берет
+# GPU целиком. Строки вида "0, Enabled, Disabled": индекс, режим сейчас, режим после сброса.
+- name: Режим MIG на GPU
+  ansible.builtin.command: nvidia-smi --query-gpu=index,mig.mode.current,mig.mode.pending --format=csv,noheader
+  register: nvidia_driver_mig
+  changed_when: false
+  when:
+    - nvidia_mig_disable | bool
+    - not ansible_check_mode
+
+- name: Выключить MIG
+  ansible.builtin.command: nvidia-smi -i {{ item }} -mig 0
+  loop: "{{ nvidia_driver_mig.stdout_lines | default([]) | select('search', ', Enabled$') | map('regex_replace', ',.*$', '') | list }}"
+  changed_when: true
+  when:
+    - nvidia_mig_disable | bool
+    - not ansible_check_mode
+
+# Новый режим применяется после сброса GPU; в виртуальной машине надежнее перезагрузить сервер.
+- name: Остановиться, если для выключения MIG нужна перезагрузка, а она запрещена
+  ansible.builtin.fail:
+    msg: >-
+      MIG выключен, но заработает только после перезагрузки. Перезагрузите сервер вручную
+      или задайте nvidia_reboot_allowed=true и запустите плейбук снова.
+  when:
+    - nvidia_mig_disable | bool
+    - nvidia_driver_mig.stdout | default('') is search(', Enabled,')
+    - not (nvidia_reboot_allowed | bool)
+    - not ansible_check_mode
+
+- name: Перезагрузить сервер, чтобы выключение MIG вступило в силу
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ nvidia_reboot_timeout }}"
+    msg: "Reboot to apply MIG mode change (Ansible)"
+  when:
+    - nvidia_mig_disable | bool
+    - nvidia_driver_mig.stdout | default('') is search(', Enabled,')
+    - nvidia_reboot_allowed | bool
+    - not ansible_check_mode
+
+- name: Режим MIG после выключения
+  ansible.builtin.command: nvidia-smi --query-gpu=index,mig.mode.current --format=csv,noheader
+  register: nvidia_driver_mig_after
+  changed_when: false
+  when:
+    - nvidia_mig_disable | bool
+    - nvidia_driver_mig.stdout | default('') is search('Enabled')
+    - not ansible_check_mode
+
+- name: MIG выключен
+  ansible.builtin.assert:
+    that: nvidia_driver_mig_after.stdout is not search(', Enabled')
+    fail_msg: >-
+      MIG остался включен и после перезагрузки. В виртуальной машине режим MIG может
+      менять только провайдер: обратитесь к нему или задайте nvidia_mig_disable=false
+      и укажите MIG-инстанс в vllm_gpus.
+    quiet: true
+  when:
+    - nvidia_mig_disable | bool
+    - nvidia_driver_mig.stdout | default('') is search('Enabled')
+    - not ansible_check_mode

@@ -18,9 +18,9 @@ vLLM в контейнере, закрывает его за nginx с ключо
 
 | Роль | Что делает | Тег |
 |---|---|---|
-| `common` | базовые пакеты, часовой пояс, ufw: открыты SSH и порт nginx, порты метрик только для `metrics_allowed_cidrs` (по умолчанию закрыты) | `common` |
-| `nvidia_driver` | проверяет GPU на шине; если рабочий драйвер уже есть (образ провайдера), не трогает его, иначе ставит драйвер заданной ветки, фиксирует его (apt hold) и перезагружает сервер; в конце проверяет `nvidia-smi` | `nvidia` |
-| `docker` | Docker CE из официального репозитория, NVIDIA Container Toolkit, `nvidia-ctk runtime configure`, тестовый `nvidia-smi` в контейнере CUDA 12.9 (заодно проверяет, что драйвер подходит образу vLLM) | `docker` |
+| `common` | базовые пакеты, часовой пояс, ufw: при первом прогоне сбрасывает правила, с которыми пришел образ, затем открывает SSH и порт nginx, порты метрик только для `metrics_allowed_cidrs` (по умолчанию закрыты) | `common` |
+| `nvidia_driver` | проверяет GPU на шине; если рабочий драйвер уже есть (образ провайдера), не трогает его, иначе ставит драйвер заданной ветки, фиксирует его (apt hold) и перезагружает сервер; выключает MIG, если он остался включен (иначе CUDA не видит карту); в конце проверяет `nvidia-smi` | `nvidia` |
+| `docker` | Docker CE из официального репозитория, NVIDIA Container Toolkit, `nvidia-ctk runtime configure`, тестовый `nvidia-smi` в контейнере CUDA 13.0 (заодно проверяет, что драйвер подходит образу vLLM) | `docker` |
 | `vllm` | docker compose с образом `vllm/vllm-openai` закрепленной версии, ключ API, кеш HF на томе, `restart: unless-stopped`, healthcheck, порт только на 127.0.0.1 | `vllm` |
 | `api_gateway` | nginx перед vLLM: rate limit, лимит тела запроса, отсечение запросов без ключа, стриминг, опционально HTTPS по домену (свой или самоподписанный сертификат) | `gateway` |
 | `monitoring` | dcgm-exporter (метрики GPU) и node_exporter (метрики хоста), включается флагом | `monitoring` |
@@ -30,8 +30,10 @@ vLLM в контейнере, закрывает его за nginx с ключо
 
 - **vLLM**: высокая пропускная способность (continuous batching, PagedAttention) и готовый
   OpenAI-совместимый API, клиенты подключаются без доработок.
-- **Образ `vllm/vllm-openai:v0.31.0-cu129`**: версия закреплена, `latest` не используется.
-  Вариант на CUDA 12.9 работает с драйвером 575+ и поддерживает Hopper, Ada и Blackwell.
+- **Образ `vllm/vllm-openai:v0.31.0`** (CUDA 13.0): версия закреплена, `latest` не используется.
+  Нужен драйвер 580+, это ветка по умолчанию. Вариант `v0.31.0-cu129` для старых драйверов
+  не подходит: torchcodec в нем собран под CUDA 13, и vLLM падает при старте
+  (`libnvrtc.so.13: cannot open shared object file`).
 - **Драйвер ветки 580, пакет `nvidia-driver-580-server-open`**: production-ветка NVIDIA,
   покрывает CUDA 12.x и 13.x. Открытые модули ядра обязательны для Blackwell и рекомендованы
   NVIDIA для Turing и новее. Пакеты фиксируются через apt hold, чтобы unattended-upgrades
@@ -40,7 +42,7 @@ vLLM в контейнере, закрывает его за nginx с ключо
 - **Рабочий драйвер не трогается**: у GPU-провайдеров образы часто идут с драйвером.
   Если `nvidia-smi` уже работает, роль ничего не ставит и не перезагружает сервер
   (`nvidia_driver_keep_existing: true`). Подходит ли драйвер образу vLLM, проверяет тест
-  `nvidia-smi` в контейнере CUDA 12.9 в роли `docker`.
+  `nvidia-smi` в контейнере CUDA 13.0 в роли `docker`.
 - **Модель по умолчанию `Qwen/Qwen2.5-1.5B-Instruct`**: маленькая (около 3 ГБ весов),
   без гейта на Hugging Face, помещается на любую GPU от 8 ГБ. Меняется одной переменной.
 - **vLLM слушает только 127.0.0.1**: единственная точка входа nginx. Ключ проверяет сам vLLM
@@ -123,8 +125,9 @@ ansible-playbook site.yml --ask-vault-pass --skip-tags monitoring
 | `nvidia_driver_keep_existing` | `true` | не трогать уже работающий драйвер |
 | `nvidia_reboot_allowed` | `true` | разрешить перезагрузку после установки драйвера |
 | `nvidia_driver_hold` | `true` | apt hold на пакеты драйвера |
-| `docker_gpu_test_image` | `"nvidia/cuda:12.9.1-base-ubuntu24.04"` | образ для проверки GPU в Docker |
-| `vllm_image_tag` | `"v0.31.0-cu129"` | версия образа vLLM |
+| `nvidia_mig_disable` | `true` | выключить MIG, если он включен (с перезагрузкой) |
+| `docker_gpu_test_image` | `"nvidia/cuda:13.0.2-base-ubuntu24.04"` | образ для проверки GPU в Docker |
+| `vllm_image_tag` | `"v0.31.0"` | версия образа vLLM |
 | `vllm_model` | `"Qwen/Qwen2.5-1.5B-Instruct"` | модель с Hugging Face |
 | `vllm_served_model_name` | `"qwen2.5-1.5b-instruct"` | имя модели в поле `model` запросов |
 | `vllm_gpu_memory_utilization` | `0.90` | доля памяти GPU под vLLM |
@@ -142,6 +145,7 @@ ansible-playbook site.yml --ask-vault-pass --skip-tags monitoring
 | `gateway_client_max_body_size` | `1m` | максимальный размер тела запроса |
 | `api_allowed_cidrs` | `[]` | откуда разрешен доступ к API (пусто = отовсюду) |
 | `ssh_ufw_rule` | `"allow"` | правило ufw для SSH: `allow` или `limit` |
+| `ufw_reset_on_first_run` | `true` | при первом прогоне сбросить правила ufw, с которыми пришел образ |
 | `monitoring_enabled` | `true` | ставить dcgm-exporter и node_exporter |
 | `metrics_allowed_cidrs` | `[]` | откуда разрешен сбор метрик, например `["10.0.5.20/32"]` (пусто = только с самого сервера) |
 | `supported_ubuntu_versions` | `["22.04", "24.04"]` | разрешенные версии Ubuntu |
@@ -215,7 +219,7 @@ nvidia-smi
 docker compose -f /opt/vllm/docker-compose.yml ps     # STATUS: healthy
 docker logs -f vllm
 curl -s http://127.0.0.1:8000/health -o /dev/null -w '%{http_code}\n'
-curl -s http://127.0.0.1:9400/metrics | grep DCGM_FI_DEV_GPU_UTIL
+curl -s http://127.0.0.1:9400/metrics | grep -E '^DCGM_FI_(DEV_FB_USED|PROF_GR_ENGINE_ACTIVE)'
 ```
 
 ## Пример запроса к API
@@ -271,7 +275,8 @@ print(resp.choices[0].message.content)
   раннера (Ubuntu 22.04 и 24.04). Вместо vLLM работает заглушка
   [tests/mock_vllm.py](tests/mock_vllm.py) с тем же API и проверкой ключа. Три варианта:
   HTTP, HTTPS с самоподписанным сертификатом, HTTPS со своим сертификатом (ключ зашифрован
-  ansible-vault), плюс прогон на ansible-core 2.16. Проверяются ufw, `nginx -t`, роль
+  ansible-vault), плюс прогон на ansible-core 2.16. Проверяются ufw (правило «провайдера»
+  `3000:10000/tcp`, добавленное до прогона, снимается, остаются только правила плейбука), `nginx -t`, роль
   `verify` целиком (кроме `nvidia-smi`), 401 без ключа и с чужим ключом, 404 на `/docs` и
   `/metrics`, 429 при превышении rate limit, редирект на HTTPS, сертификат на домен
   ([tests/check_gateway.sh](tests/check_gateway.sh)) и то, что повторный прогон ничего
@@ -308,6 +313,10 @@ ansible-playbook site.yml --ask-vault-pass --check --diff --tags common
   `/v1/*` и `/health`; `/metrics` и `/docs` vLLM закрыты.
 - ufw: по умолчанию все входящие закрыты, открыты только SSH и порт nginx. Порты метрик
   открываются только для адресов из `metrics_allowed_cidrs`.
+- Образы провайдеров бывают со своими правилами ufw, например с открытым диапазоном портов,
+  куда попадают порты экспортеров. Поэтому первый прогон сбрасывает ufw
+  (`ufw_reset_on_first_run`, старые правила ufw сохраняет в `/etc/ufw/*.rules.<дата>`) и
+  ставит метку `/etc/ufw/.ansible-managed`; дальше ufw не сбрасывается.
 - SSH по умолчанию `allow`, а не `limit`: ufw `limit` блокирует IP после 6 подключений
   за 30 секунд, и Ansible без ControlPersist (например, через `ssh.exe` Windows) упирается
   в этот лимит посреди прогона. С ControlPersist можно включить `ssh_ufw_rule: "limit"`.
@@ -317,9 +326,15 @@ ansible-playbook site.yml --ask-vault-pass --check --diff --tags common
 
 ## Нюансы и диагностика
 
-- **`unsatisfied condition: cuda>=12.9` в тесте GPU (роль `docker`)**: драйвер старше 575
-  не подходит образу vLLM на CUDA 12.9. Обновить драйвер (`nvidia_driver_keep_existing: false`,
-  нужна перезагрузка) или взять тег vLLM на более старой CUDA.
+- **`unsatisfied condition: cuda>=13.0` в тесте GPU (роль `docker`)**: драйвер старше 580
+  не подходит образу vLLM на CUDA 13.0. Обновить драйвер (`nvidia_driver_keep_existing: false`,
+  нужна перезагрузка) или подобрать тег vLLM на CUDA 12.x (про `-cu129` см. «Ключевые решения»).
+- **MIG включен без GPU-инстансов**: режим MIG хранится на самой карте, и у провайдеров он
+  может остаться от прошлого арендатора. `nvidia-smi` видит GPU, а CUDA нет: vLLM падает с
+  `No CUDA GPUs are available`, в `dmesg` строка `Channel allocation not allowed when MIG is
+  enabled`, загрузка GPU `N/A`, метрики `DCGM_FI_DEV_GPU_UTIL` нет. Роль `nvidia_driver`
+  выключает MIG и перезагружает сервер; чтобы оставить MIG, задать `nvidia_mig_disable: false`
+  и MIG-инстанс в `vllm_gpus`.
 - **vLLM не стартует с `Free memory on device ... is less than desired GPU memory utilization`**:
   часть памяти GPU занята другим процессом (рабочий стол в desktop-образе, другой контейнер).
   Уменьшить `vllm_gpu_memory_utilization`, например до `0.80`.
