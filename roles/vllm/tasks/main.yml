@@ -1,0 +1,45 @@
+---
+- name: Каталоги vLLM
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ vllm_dir }}"
+    - "{{ vllm_hf_cache_dir }}"
+
+- name: Секреты vLLM (vllm.env, только для root)
+  ansible.builtin.template:
+    src: vllm.env.j2
+    dest: "{{ vllm_dir }}/vllm.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: docker-compose.yml для vLLM
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ vllm_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Скачать образ vLLM
+  ansible.builtin.command: docker compose pull --quiet
+  args:
+    chdir: "{{ vllm_dir }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+# compose сам пересоздает контейнер, если изменился docker-compose.yml или vllm.env,
+# и ничего не делает, если все совпадает. Поэтому отдельный handler не нужен.
+- name: Запустить vLLM (docker compose up)
+  ansible.builtin.command: docker compose up -d --remove-orphans
+  args:
+    chdir: "{{ vllm_dir }}"
+  register: vllm_up
+  changed_when: vllm_up.stderr is regex('(Created|Recreated|Started)')
+  when: not ansible_check_mode

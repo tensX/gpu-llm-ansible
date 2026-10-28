@@ -1,0 +1,77 @@
+---
+# Сквозная проверка: драйвер -> контейнер vLLM -> nginx -> ответ модели.
+# В check mode пропускается целиком: проверять нечего, сервисы не запущены.
+
+- name: Проверки после развертывания
+  when: not ansible_check_mode
+  block:
+    - name: nvidia-smi на хосте
+      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv
+      register: verify_smi
+      changed_when: false
+
+    - name: Ждать готовности vLLM (/health, загрузка модели может идти несколько минут)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ vllm_port }}/health"
+        status_code: 200
+      register: verify_health
+      until: verify_health.status == 200
+      retries: "{{ verify_health_retries }}"
+      delay: "{{ verify_health_delay }}"
+
+    - name: Схема и порт шлюза
+      ansible.builtin.set_fact:
+        verify_base_url: >-
+          {{ 'https://127.0.0.1:' ~ gateway_tls_port if gateway_tls_enabled | bool
+             else 'http://127.0.0.1:' ~ gateway_port }}
+
+    - name: Запрос без ключа отклоняется (401)
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/v1/models"
+        status_code: 401
+        validate_certs: false
+
+    - name: Список моделей через nginx с ключом (/v1/models)
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/v1/models"
+        headers:
+          Authorization: "Bearer {{ vllm_api_key }}"
+        validate_certs: false
+        return_content: true
+      register: verify_models
+      no_log: true
+
+    - name: Модель видна в API
+      ansible.builtin.assert:
+        that:
+          - vllm_served_model_name in (verify_models.json.data | map(attribute='id') | list)
+        fail_msg: "Модель {{ vllm_served_model_name }} не найдена в /v1/models"
+        quiet: true
+
+    - name: Тестовый запрос /v1/chat/completions через nginx
+      ansible.builtin.uri:
+        url: "{{ verify_base_url }}/v1/chat/completions"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ vllm_api_key }}"
+        body_format: json
+        body:
+          model: "{{ vllm_served_model_name }}"
+          messages:
+            - role: user
+              content: "{{ verify_prompt }}"
+          max_tokens: "{{ verify_max_tokens | int }}"
+          temperature: 0
+        validate_certs: false
+        timeout: 120
+        return_content: true
+      register: verify_chat
+      no_log: true
+
+    - name: Итог проверки
+      ansible.builtin.debug:
+        msg:
+          - "GPU: {{ verify_smi.stdout_lines[1:] | join('; ') }}"
+          - "Модель: {{ vllm_served_model_name }} ({{ vllm_model }})"
+          - "Ответ: {{ verify_chat.json.choices[0].message.content | trim }}"
+          - "Токены: {{ verify_chat.json.usage.total_tokens }}"

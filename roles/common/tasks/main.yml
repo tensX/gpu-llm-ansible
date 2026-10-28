@@ -1,0 +1,62 @@
+---
+- name: Обновить кеш apt
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Базовые пакеты
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+
+- name: Часовой пояс
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+# Сначала правило для SSH, потом политика deny и включение: доступ не теряется.
+- name: ufw, SSH (с ограничением частоты подключений)
+  community.general.ufw:
+    rule: limit
+    port: "{{ ssh_port | string }}"
+    proto: tcp
+
+- name: Порты шлюза API
+  ansible.builtin.set_fact:
+    common_gateway_ports: "{{ [gateway_port] + ([gateway_tls_port] if gateway_tls_enabled | bool else []) }}"
+
+- name: ufw, API через nginx (со всех адресов)
+  community.general.ufw:
+    rule: allow
+    port: "{{ item | string }}"
+    proto: tcp
+  loop: "{{ common_gateway_ports }}"
+  when: api_allowed_cidrs | length == 0
+
+- name: ufw, API через nginx (только разрешенные сети)
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.1 | string }}"
+    proto: tcp
+    from_ip: "{{ item.0 }}"
+  loop: "{{ api_allowed_cidrs | product(common_gateway_ports) | list }}"
+
+- name: ufw, метрики только из сети мониторинга
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.1 | string }}"
+    proto: tcp
+    from_ip: "{{ item.0 }}"
+  loop: "{{ metrics_allowed_cidrs | product([dcgm_exporter_port, node_exporter_port]) | list }}"
+  when: monitoring_enabled | bool
+
+- name: ufw, входящие по умолчанию закрыты, исходящие открыты
+  community.general.ufw:
+    direction: "{{ item.direction }}"
+    policy: "{{ item.policy }}"
+  loop:
+    - { direction: incoming, policy: deny }
+    - { direction: outgoing, policy: allow }
+
+- name: ufw, включить
+  community.general.ufw:
+    state: enabled

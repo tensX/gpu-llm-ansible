@@ -1,0 +1,248 @@
+# GPU-сервер с LLM: Ansible + vLLM
+
+Ansible-плейбук, который превращает чистый Ubuntu-сервер с GPU NVIDIA в рабочий LLM API,
+совместимый с OpenAI API: ставит драйвер, Docker с NVIDIA Container Toolkit, поднимает
+vLLM в контейнере, закрывает его за nginx с ключом и rate limit, включает мониторинг GPU
+и в конце сам проверяет, что модель отвечает.
+
+## Архитектура
+
+```
+ клиент ──HTTP(S)──▶ ufw ──▶ nginx :80/:443 ──▶ 127.0.0.1:8000 vLLM (Docker, GPU)
+                     │        - Bearer-ключ обязателен           - OpenAI API /v1/*
+                     │        - rate limit, лимит тела            - ключ VLLM_API_KEY
+                     │        - наружу только /v1/* и /health     - кеш моделей на томе
+                     │
+                     └─(только metrics_allowed_cidrs)─▶ dcgm-exporter :9400, node_exporter :9100
+```
+
+| Роль | Что делает | Тег |
+|---|---|---|
+| `common` | базовые пакеты, часовой пояс, ufw: открыты только SSH и порт nginx (и метрики для сети мониторинга) | `common` |
+| `nvidia_driver` | проверяет GPU на шине, ставит драйвер заданной ветки, фиксирует его (apt hold), перезагружает только при необходимости, проверяет `nvidia-smi` | `nvidia` |
+| `docker` | Docker CE из официального репозитория, NVIDIA Container Toolkit, `nvidia-ctk runtime configure`, тестовый `nvidia-smi` в контейнере | `docker` |
+| `vllm` | docker compose с образом `vllm/vllm-openai` закрепленной версии, ключ API, кеш HF на томе, `restart: unless-stopped`, healthcheck, порт только на 127.0.0.1 | `vllm` |
+| `api_gateway` | nginx перед vLLM: rate limit, лимит тела запроса, отсечение запросов без ключа, стриминг, опционально TLS | `gateway` |
+| `monitoring` | dcgm-exporter (метрики GPU) и node_exporter (метрики хоста), включается флагом | `monitoring` |
+| `verify` | `nvidia-smi`, ожидание `/health`, 401 без ключа, `/v1/models` и тестовый `/v1/chat/completions` через nginx | `verify` |
+
+Ключевые решения:
+
+- **vLLM**: высокая пропускная способность (continuous batching, PagedAttention) и готовый
+  OpenAI-совместимый API, клиенты подключаются без доработок.
+- **Образ `vllm/vllm-openai:v0.31.0-cu129`**: версия закреплена, `latest` не используется.
+  Вариант на CUDA 12.9 работает с драйвером 575+ и поддерживает Hopper, Ada и Blackwell.
+- **Драйвер ветки 580 (`-server`)**: production-ветка NVIDIA, покрывает CUDA 12.x и 13.x.
+  Пакеты фиксируются через apt hold, чтобы unattended-upgrades не обновил драйвер под
+  работающей моделью (несовпадение версий модуля ядра и библиотек ломает `nvidia-smi`).
+- **Модель по умолчанию `Qwen/Qwen2.5-1.5B-Instruct`**: маленькая (около 3 ГБ весов),
+  без гейта на Hugging Face, помещается на любую GPU от 8 ГБ. Меняется одной переменной.
+- **vLLM слушает только 127.0.0.1**: единственная точка входа nginx. Ключ проверяет сам vLLM
+  (переменная `VLLM_API_KEY`, аналог `--api-key`: так ключ не виден в `ps` и аргументах
+  контейнера), nginx дополнительно отбрасывает запросы без заголовка `Authorization`
+  до того, как они дойдут до GPU.
+- **Экспортеры в `network_mode: host`**: порты, опубликованные Docker через `ports:`,
+  обходят ufw. С host-сетью доступ к метрикам действительно ограничивает ufw.
+- **Автозапуск**: Docker включен в systemd, контейнеры с `restart: unless-stopped`,
+  после перезагрузки сервера все поднимается само.
+
+## Требования
+
+**Сервер**
+
+- Ubuntu 22.04 или 24.04 (x86_64), GPU NVIDIA (архитектура Turing и новее), от 8 ГБ VRAM
+  для модели по умолчанию.
+- Доступ в интернет: репозитории Ubuntu, Docker, NVIDIA, Docker Hub, Hugging Face.
+- 40+ ГБ свободного места (образ vLLM около 10 ГБ, плюс модели).
+- Пользователь с sudo и SSH-доступом по ключу.
+- Secure Boot выключен, либо готовность подписать модуль NVIDIA (иначе драйвер не загрузится).
+
+**Машина, с которой запускается Ansible**
+
+- Linux, macOS или WSL; `ansible-core` 2.15+ (синтаксис проверен на 2.16).
+- Коллекция `community.general` (ufw, timezone): `ansible-galaxy collection install -r requirements.yml`.
+
+## Быстрый старт
+
+```bash
+# 1. Коллекции
+ansible-galaxy collection install -r requirements.yml
+
+# 2. Инвентарь
+cp inventory/hosts.example.yml inventory/hosts.yml
+#    указать ansible_host и ansible_user своего сервера
+
+# 3. Секреты
+cp group_vars/all/vault.yml.example group_vars/all/vault.yml
+#    вписать vllm_api_key (например, вывод openssl rand -hex 32), при необходимости hf_token
+ansible-vault encrypt group_vars/all/vault.yml
+
+# 4. Запуск
+ansible-playbook site.yml --ask-vault-pass
+```
+
+Первый прогон занимает 10-20 минут: установка драйвера с перезагрузкой, скачивание образа
+vLLM и модели. Повторный прогон ничего не меняет (идемпотентность) и не перезагружает сервер.
+
+Запуск по частям через теги:
+
+```bash
+ansible-playbook site.yml --ask-vault-pass --tags vllm,verify     # обновить модель/параметры и проверить
+ansible-playbook site.yml --ask-vault-pass --tags verify          # только проверка
+ansible-playbook site.yml --ask-vault-pass --skip-tags monitoring
+```
+
+## Переменные
+
+Все настройки в [group_vars/all/main.yml](group_vars/all/main.yml), секреты в
+`group_vars/all/vault.yml` (зашифрован ansible-vault). Для отдельного сервера значения
+можно переопределить в `host_vars/<имя>.yml`.
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `vllm_api_key` | (vault, обязательно) | ключ API, 16+ символов |
+| `hf_token` | `""` (vault) | токен Hugging Face для моделей с гейтом |
+| `nvidia_driver_version` | `"580"` | ветка драйвера или `auto` (выбор `ubuntu-drivers`) |
+| `nvidia_driver_flavor` | `"server"` | `server` или `""` для обычных пакетов |
+| `nvidia_reboot_allowed` | `true` | разрешить перезагрузку после установки драйвера |
+| `nvidia_driver_hold` | `true` | apt hold на пакеты драйвера |
+| `vllm_image_tag` | `"v0.31.0-cu129"` | версия образа vLLM |
+| `vllm_model` | `"Qwen/Qwen2.5-1.5B-Instruct"` | модель с Hugging Face |
+| `vllm_served_model_name` | `"qwen2.5-1.5b-instruct"` | имя модели в поле `model` запросов |
+| `vllm_gpu_memory_utilization` | `0.90` | доля памяти GPU под vLLM |
+| `vllm_max_model_len` | `8192` | максимальная длина контекста |
+| `vllm_tensor_parallel_size` | `1` | число GPU для одной модели |
+| `vllm_gpus` | `"all"` | какие GPU отдать контейнеру (`"0,1"`) |
+| `vllm_extra_args` | `[]` | дополнительные аргументы vLLM, например `["--quantization", "awq"]` |
+| `gateway_port` | `80` | порт nginx |
+| `gateway_tls_enabled` | `false` | включить HTTPS (443) с редиректом с 80 |
+| `gateway_tls_cert` / `gateway_tls_key` | `/etc/ssl/...` | пути к сертификату и ключу |
+| `gateway_tls_self_signed` | `true` | выпустить самоподписанный сертификат, если файла нет |
+| `gateway_rate_limit` / `gateway_rate_burst` | `10r/s` / `20` | rate limit на IP клиента |
+| `gateway_client_max_body_size` | `1m` | максимальный размер тела запроса |
+| `api_allowed_cidrs` | `[]` | откуда разрешен доступ к API (пусто = отовсюду) |
+| `monitoring_enabled` | `true` | ставить dcgm-exporter и node_exporter |
+| `metrics_allowed_cidrs` | `["10.0.0.0/8"]` | откуда разрешен сбор метрик |
+
+Пример замены модели на большую с гейтом (нужен `hf_token` в vault):
+
+```yaml
+# host_vars/gpu-01.yml
+vllm_model: "meta-llama/Llama-3.1-8B-Instruct"
+vllm_served_model_name: "llama-3.1-8b-instruct"
+vllm_max_model_len: 16384
+```
+
+## Проверка работоспособности
+
+Роль `verify` выполняется в конце каждого прогона и проверяет цепочку целиком:
+
+1. `nvidia-smi` на хосте видит GPU и драйвер.
+2. `/health` vLLM отвечает 200 (ожидание до 15 минут, пока скачивается и загружается модель).
+3. Запрос без ключа через nginx получает 401.
+4. `/v1/models` через nginx с ключом возвращает модель.
+5. Тестовый `/v1/chat/completions` через nginx возвращает ответ; он выводится в лог прогона.
+
+Ручная проверка на сервере:
+
+```bash
+nvidia-smi
+docker compose -f /opt/vllm/docker-compose.yml ps     # STATUS: healthy
+docker logs -f vllm
+curl -s http://127.0.0.1:8000/health -o /dev/null -w '%{http_code}\n'
+curl -s http://127.0.0.1:9400/metrics | grep DCGM_FI_DEV_GPU_UTIL
+```
+
+## Пример запроса к API
+
+```bash
+export LLM_HOST=203.0.113.10
+export LLM_API_KEY=<ключ из vault>
+
+curl -s http://$LLM_HOST/v1/chat/completions \
+  -H "Authorization: Bearer $LLM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "qwen2.5-1.5b-instruct",
+        "messages": [
+          {"role": "system", "content": "Ты полезный ассистент."},
+          {"role": "user", "content": "Объясни в двух предложениях, что такое GPU."}
+        ],
+        "max_tokens": 200,
+        "temperature": 0.7
+      }' | jq -r '.choices[0].message.content'
+```
+
+Стриминг (`"stream": true`) работает через nginx без буферизации:
+
+```bash
+curl -N http://$LLM_HOST/v1/chat/completions \
+  -H "Authorization: Bearer $LLM_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "qwen2.5-1.5b-instruct", "stream": true,
+       "messages": [{"role": "user", "content": "Привет!"}]}'
+```
+
+Тот же API подходит для любого OpenAI-клиента:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://203.0.113.10/v1", api_key="<ключ>")
+resp = client.chat.completions.create(
+    model="qwen2.5-1.5b-instruct",
+    messages=[{"role": "user", "content": "Привет!"}],
+)
+print(resp.choices[0].message.content)
+```
+
+## Проверка без GPU
+
+Без сервера с GPU проверяется сам плейбук: синтаксис, шаблоны, стиль.
+
+```bash
+# Синтаксис плейбука и ролей
+ansible-playbook -i inventory/hosts.example.yml site.yml --syntax-check
+
+# Стиль и лучшие практики
+yamllint .
+ansible-lint site.yml
+```
+
+Прогон в check mode (`--check --diff`) ничего не меняет на сервере и показывает, что
+изменилось бы. На уже развернутом сервере это проверка дрейфа конфигурации. На чистой ВМ
+без GPU и без репозиториев Docker/NVIDIA осмысленно проверяется только базовая роль:
+
+```bash
+ansible-playbook site.yml --ask-vault-pass --check --diff --tags common
+```
+
+Задачи, которые меняют систему через `command` (docker compose, nvidia-ctk) или требуют
+работающего сервиса (`nginx -t`, проверки HTTP), в check mode пропускаются явно.
+
+## Безопасность
+
+- Ключ API и токен HF только в ansible-vault; на сервере в `/opt/vllm/vllm.env` с правами `0600`;
+  задачи с ключом помечены `no_log`.
+- vLLM не доступен снаружи напрямую (порт только на 127.0.0.1), наружу отдаются только
+  `/v1/*` и `/health`; `/metrics` и `/docs` vLLM закрыты.
+- ufw: по умолчанию все входящие закрыты, SSH с ограничением частоты (`limit`).
+- Rate limit и лимит тела запроса в nginx защищают GPU от перегрузки и простого DoS.
+- Доступ к API можно ограничить сетями (`api_allowed_cidrs`), включить TLS (`gateway_tls_enabled`).
+
+## Что улучшить дальше
+
+- **TLS с настоящим сертификатом**: Let's Encrypt (certbot) или сертификат из внутреннего CA
+  вместо самоподписанного.
+- **Ключи на клиента**: сейчас один общий ключ. Для нескольких команд поставить LiteLLM
+  или API-gateway с отдельными ключами, квотами и учетом токенов.
+- **Сбор метрик и алерты**: Prometheus + Grafana (дашборд DCGM, метрики vLLM `/metrics`:
+  очередь запросов, время до первого токена, использование KV-кеша), алерты на перегрев GPU,
+  ошибки XID, падение healthcheck.
+- **Логи**: отправка логов nginx и vLLM в Loki/ELK.
+- **Масштабирование**: несколько серверов за балансировщиком, несколько моделей на разных GPU
+  (по контейнеру на модель с `vllm_gpus`), Kubernetes с GPU Operator при росте парка.
+- **Быстрый холодный старт**: заранее скачанные модели (локальное зеркало HF или S3),
+  чтобы новый сервер не качал веса из интернета.
+- **Тестирование ролей**: Molecule с Docker/Vagrant и прогон в CI (lint, syntax-check, check mode).
+- **Обновления без простоя**: rolling-обновление по серверам (`serial: 1`) с выводом узла
+  из балансировщика.

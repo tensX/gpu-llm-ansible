@@ -1,0 +1,94 @@
+---
+# Все настройки развертывания. Секреты лежат отдельно в vault.yml (ansible-vault).
+
+# --- Базовая система (роль common) ---
+common_packages:
+  - curl
+  - ca-certificates
+  - gnupg
+  - jq
+  - htop
+  - ufw
+  - pciutils
+  - python3-apt
+timezone: "UTC"
+ssh_port: 22
+# Откуда разрешен доступ к API (nginx). Пусто = отовсюду.
+api_allowed_cidrs: []
+# Откуда разрешен сбор метрик (Prometheus). Пусто = порты экспортеров закрыты.
+metrics_allowed_cidrs: ["10.0.0.0/8"]
+
+# --- Драйвер NVIDIA (роль nvidia_driver) ---
+# Ветка драйвера, например "580" (production branch, CUDA до 13.x).
+# "auto" = ubuntu-drivers выберет рекомендованный сам.
+nvidia_driver_version: "580"
+# "server" = пакеты nvidia-driver-XXX-server (для серверов без графики), "" = обычные.
+nvidia_driver_flavor: "server"
+# Разрешить плейбуку перезагрузить сервер после установки драйвера.
+nvidia_reboot_allowed: true
+nvidia_reboot_timeout: 900
+# Зафиксировать пакеты драйвера (apt hold), чтобы unattended-upgrades не обновил
+# драйвер под работающим контейнером.
+nvidia_driver_hold: true
+
+# --- Docker и NVIDIA Container Toolkit (роль docker) ---
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+# Пусто = последняя версия из репозитория NVIDIA, иначе например "1.17.8-1".
+nvidia_container_toolkit_version: ""
+
+# --- vLLM (роль vllm) ---
+vllm_image: "vllm/vllm-openai"
+# Закрепленная версия. Вариант cu129 (CUDA 12.9) работает с драйвером 575+.
+vllm_image_tag: "v0.31.0-cu129"
+# Модель с Hugging Face. По умолчанию маленькая и без гейта (не нужен HF_TOKEN).
+vllm_model: "Qwen/Qwen2.5-1.5B-Instruct"
+# Имя модели в API (поле "model" в запросах).
+vllm_served_model_name: "qwen2.5-1.5b-instruct"
+vllm_dir: "/opt/vllm"
+vllm_hf_cache_dir: "/opt/vllm/hf-cache"
+# Порт на хосте; публикуется только на 127.0.0.1, снаружи доступен через nginx.
+vllm_port: 8000
+vllm_gpu_memory_utilization: 0.90
+vllm_max_model_len: 8192
+vllm_tensor_parallel_size: 1
+# "all" или список индексов через запятую, например "0,1".
+vllm_gpus: "all"
+vllm_extra_args: []
+# Сколько ждать готовности модели (скачивание + загрузка в GPU), секунд.
+vllm_startup_timeout: 900
+# Секреты задаются в group_vars/all/vault.yml:
+# vllm_api_key: "..."   обязательно, 16+ символов
+# hf_token: "..."       опционально, для моделей с гейтом
+
+# --- nginx перед vLLM (роль api_gateway) ---
+gateway_port: 80
+gateway_server_name: "_"
+gateway_tls_enabled: false
+gateway_tls_port: 443
+gateway_tls_cert: "/etc/ssl/certs/llm-api.crt"
+gateway_tls_key: "/etc/ssl/private/llm-api.key"
+# Если своего сертификата нет: выпустить самоподписанный (для теста).
+gateway_tls_self_signed: true
+gateway_rate_limit: "10r/s"
+gateway_rate_burst: 20
+gateway_client_max_body_size: "1m"
+gateway_read_timeout: "300s"
+
+# --- Мониторинг (роль monitoring) ---
+monitoring_enabled: true
+monitoring_dir: "/opt/monitoring"
+dcgm_exporter_image: "nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-ubuntu22.04"
+dcgm_exporter_port: 9400
+node_exporter_image: "quay.io/prometheus/node-exporter:v1.8.2"
+node_exporter_port: 9100
+
+# --- Проверка (роль verify) ---
+verify_prompt: "Ответь одним словом: столица Франции?"
+verify_max_tokens: 16
+verify_health_retries: 90
+verify_health_delay: 10
