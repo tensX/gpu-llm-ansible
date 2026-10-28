@@ -1,0 +1,140 @@
+---
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ANSIBLE_FORCE_COLOR: "1"
+  PY_COLORS: "1"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Установить инструменты
+        run: |
+          pip install -r requirements-dev.txt
+          ansible-galaxy collection install -r requirements.yml -p collections
+
+      - name: yamllint
+        run: yamllint --strict .
+
+      - name: ansible-lint
+        run: ansible-lint
+
+      - name: Синтаксис плейбука
+        run: ansible-playbook -i tests/inventory.yml site.yml --syntax-check
+
+      - name: Шаблоны docker compose
+        run: |
+          ansible-playbook -i localhost, tests/render.yml -e render_dir="$RUNNER_TEMP/compose"
+          for f in "$RUNNER_TEMP"/compose/*/docker-compose.yml; do
+            echo "docker compose config: $f"
+            docker compose -f "$f" config --quiet
+          done
+
+  # Плейбук без GPU-ролей на одноразовой ВМ раннера, вместо vLLM заглушка с тем же API.
+  e2e:
+    name: e2e (${{ matrix.os }}, ${{ matrix.tls }}, ansible-core ${{ matrix.ansible-core }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        tls: [http, self-signed, own-cert]
+        ansible-core: [latest]
+        include:
+          # ansible-core из пакета Ubuntu 24.04; community.general 11.x последняя с его поддержкой.
+          - os: ubuntu-24.04
+            tls: self-signed
+            ansible-core: "2.16"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Установить Ansible
+        run: |
+          if [ "${{ matrix.ansible-core }}" = latest ]; then
+            pip install "$(grep '^ansible-core==' requirements-dev.txt)"
+            ansible-galaxy collection install -r requirements.yml -p collections
+          else
+            pip install "ansible-core==${{ matrix.ansible-core }}.*"
+            ansible-galaxy collection install 'community.general:>=11.0.0,<12.0.0' -p collections
+          fi
+          ansible --version
+
+      - name: Заглушка vLLM и переменные прогона
+        run: |
+          key=$(openssl rand -hex 32)
+          echo "::add-mask::$key"
+          echo "VLLM_API_KEY=$key" >> "$GITHUB_ENV"
+          openssl rand -hex 16 > "$RUNNER_TEMP/vault-pass"
+          case "${{ matrix.tls }}" in
+            http) tls='"gateway_tls_enabled": false' ;;
+            self-signed) tls='"gateway_tls_enabled": true' ;;
+            own-cert)
+              # Свой сертификат, ключ зашифрован ansible-vault, как описано в README.
+              mkdir -p "$RUNNER_TEMP/tls"
+              openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=llm.example.test" \
+                -addext "subjectAltName=DNS:llm.example.test" \
+                -keyout "$RUNNER_TEMP/tls/llm.key" -out "$RUNNER_TEMP/tls/llm.crt"
+              ansible-vault encrypt --vault-password-file "$RUNNER_TEMP/vault-pass" "$RUNNER_TEMP/tls/llm.key"
+              tls="\"gateway_tls_enabled\": true, \"gateway_tls_cert_src\": \"$RUNNER_TEMP/tls/llm.crt\","
+              tls="$tls \"gateway_tls_key_src\": \"$RUNNER_TEMP/tls/llm.key\""
+              ;;
+          esac
+          printf '{"vllm_api_key": "%s", %s}\n' "$key" "$tls" > "$RUNNER_TEMP/ci-vars.json"
+          args="-i tests/inventory.yml site.yml --tags common,gateway,verify --skip-tags verify_gpu"
+          args="$args -e @tests/ci-vars.yml -e @$RUNNER_TEMP/ci-vars.json --vault-password-file $RUNNER_TEMP/vault-pass"
+          echo "PLAYBOOK_ARGS=$args" >> "$GITHUB_ENV"
+          VLLM_API_KEY="$key" nohup python3 tests/mock_vllm.py > "$RUNNER_TEMP/mock.log" 2>&1 &
+          for _ in $(seq 20); do
+            curl -sf -o /dev/null http://127.0.0.1:8000/health && exit 0
+            sleep 0.5
+          done
+          echo "Заглушка vLLM не запустилась" >&2
+          exit 1
+
+      - name: Плейбук
+        run: ansible-playbook $PLAYBOOK_ARGS
+
+      - name: Повторный прогон ничего не меняет
+        run: |
+          ANSIBLE_NOCOLOR=1 ANSIBLE_FORCE_COLOR=0 ansible-playbook $PLAYBOOK_ARGS | tee "$RUNNER_TEMP/second.log"
+          grep -qE 'changed=0 +unreachable=0 +failed=0' "$RUNNER_TEMP/second.log"
+
+      - name: Проверки через nginx
+        env:
+          TLS: ${{ matrix.tls }}
+        run: bash tests/check_gateway.sh
+
+      - name: Логи при ошибке
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/mock.log" || true
+          sudo tail -n 50 /var/log/nginx/error.log || true

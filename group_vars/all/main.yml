@@ -79,12 +79,19 @@ vllm_startup_timeout: 900
 
 # --- nginx перед vLLM (роль api_gateway) ---
 gateway_port: 80
+# Домен API, например "llm.example.com" (можно несколько через пробел).
+# "_" = любое имя и IP сервера. Подробнее в README, раздел «Домен и HTTPS».
 gateway_server_name: "_"
 gateway_tls_enabled: false
 gateway_tls_port: 443
+# Где сертификат (с цепочкой) и ключ лежат на сервере.
 gateway_tls_cert: "/etc/ssl/certs/llm-api.crt"
 gateway_tls_key: "/etc/ssl/private/llm-api.key"
-# Если своего сертификата нет: выпустить самоподписанный (для теста).
+# Свой сертификат на машине, где запускается Ansible: пути к файлам, плейбук скопирует их
+# на сервер. Ключ шифруется ansible-vault и расшифровывается при копировании. Пусто = не копировать.
+gateway_tls_cert_src: ""
+gateway_tls_key_src: ""
+# Если своего сертификата нет: выпустить самоподписанный на gateway_server_name (для теста).
 gateway_tls_self_signed: true
 gateway_rate_limit: "10r/s"
 gateway_rate_burst: 20

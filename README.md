@@ -22,7 +22,7 @@ vLLM в контейнере, закрывает его за nginx с ключо
 | `nvidia_driver` | проверяет GPU на шине; если рабочий драйвер уже есть (образ провайдера), не трогает его, иначе ставит драйвер заданной ветки, фиксирует его (apt hold) и перезагружает сервер; в конце проверяет `nvidia-smi` | `nvidia` |
 | `docker` | Docker CE из официального репозитория, NVIDIA Container Toolkit, `nvidia-ctk runtime configure`, тестовый `nvidia-smi` в контейнере CUDA 12.9 (заодно проверяет, что драйвер подходит образу vLLM) | `docker` |
 | `vllm` | docker compose с образом `vllm/vllm-openai` закрепленной версии, ключ API, кеш HF на томе, `restart: unless-stopped`, healthcheck, порт только на 127.0.0.1 | `vllm` |
-| `api_gateway` | nginx перед vLLM: rate limit, лимит тела запроса, отсечение запросов без ключа, стриминг, опционально TLS | `gateway` |
+| `api_gateway` | nginx перед vLLM: rate limit, лимит тела запроса, отсечение запросов без ключа, стриминг, опционально HTTPS по домену (свой или самоподписанный сертификат) | `gateway` |
 | `monitoring` | dcgm-exporter (метрики GPU) и node_exporter (метрики хоста), включается флагом | `monitoring` |
 | `verify` | `nvidia-smi`, ожидание `/health`, 401 без ключа, `/v1/models` и тестовый `/v1/chat/completions` через nginx | `verify` |
 
@@ -68,11 +68,13 @@ vLLM в контейнере, закрывает его за nginx с ключо
 
 **Машина, с которой запускается Ansible**
 
-- Linux, macOS или WSL; `ansible-core` 2.15+ (синтаксис проверен на 2.16).
+- Linux, macOS или WSL; `ansible-core` 2.16+ (в CI прогоняется на 2.21 и на 2.16 из пакета Ubuntu 24.04).
 - В WSL проект на диске Windows (`/mnt/c`, `/mnt/d`) лежит в каталоге с правами на запись
   для всех, и Ansible игнорирует `ansible.cfg` из такого каталога. Либо скопировать проект
   в домашний каталог WSL, либо указать конфиг явно: `export ANSIBLE_CONFIG=$PWD/ansible.cfg`.
 - Коллекция `community.general` (ufw, timezone): `ansible-galaxy collection install -r requirements.yml`.
+  Свежие версии коллекции требуют ansible-core 2.18+, для 2.16 и 2.17 подходит 11.x:
+  `ansible-galaxy collection install 'community.general:>=11.0.0,<12.0.0'`.
 
 ## Быстрый старт
 
@@ -131,9 +133,11 @@ ansible-playbook site.yml --ask-vault-pass --skip-tags monitoring
 | `vllm_gpus` | `"all"` | какие GPU отдать контейнеру (`"0,1"`) |
 | `vllm_extra_args` | `[]` | дополнительные аргументы vLLM, например `["--quantization", "awq"]` |
 | `gateway_port` | `80` | порт nginx |
+| `gateway_server_name` | `"_"` | домен API (`server_name` в nginx); `_` = любое имя и IP |
 | `gateway_tls_enabled` | `false` | включить HTTPS (443) с редиректом с 80 |
-| `gateway_tls_cert` / `gateway_tls_key` | `/etc/ssl/...` | пути к сертификату и ключу |
-| `gateway_tls_self_signed` | `true` | выпустить самоподписанный сертификат, если файла нет |
+| `gateway_tls_cert` / `gateway_tls_key` | `/etc/ssl/...` | где сертификат и ключ лежат на сервере |
+| `gateway_tls_cert_src` / `gateway_tls_key_src` | `""` | свой сертификат и ключ (ansible-vault) на машине с Ansible, плейбук скопирует их на сервер |
+| `gateway_tls_self_signed` | `true` | выпустить самоподписанный сертификат на домен, если файла нет и свой не задан |
 | `gateway_rate_limit` / `gateway_rate_burst` | `10r/s` / `20` | rate limit на IP клиента |
 | `gateway_client_max_body_size` | `1m` | максимальный размер тела запроса |
 | `api_allowed_cidrs` | `[]` | откуда разрешен доступ к API (пусто = отовсюду) |
@@ -149,6 +153,49 @@ ansible-playbook site.yml --ask-vault-pass --skip-tags monitoring
 vllm_model: "meta-llama/Llama-3.1-8B-Instruct"
 vllm_served_model_name: "llama-3.1-8b-instruct"
 vllm_max_model_len: 16384
+```
+
+## Домен и HTTPS
+
+По умолчанию `gateway_server_name: "_"` и TLS выключен: nginx отвечает по HTTP на любое имя
+и на IP сервера. Для работы по домену нужна A-запись домена на IP сервера и две переменные
+(в `group_vars/all/main.yml` или `host_vars/<имя>.yml`):
+
+```yaml
+gateway_server_name: "llm.example.com"
+gateway_tls_enabled: true
+```
+
+ufw откроет порт 443, запросы по HTTP получат редирект на HTTPS. Сертификат подключается
+одним из трех способов.
+
+**Свой сертификат** (от CA или Let's Encrypt). Файлы лежат на машине, с которой запускается
+Ansible, ключ зашифрован ansible-vault тем же паролем, что `vault.yml`. Плейбук копирует их
+на сервер в `gateway_tls_cert` и `gateway_tls_key`, ключ расшифровывается при копировании.
+
+```bash
+mkdir -p files/tls                                # каталог в .gitignore
+cp fullchain.pem files/tls/llm.example.com.crt    # сертификат с цепочкой
+cp privkey.pem files/tls/llm.example.com.key
+ansible-vault encrypt files/tls/llm.example.com.key
+```
+
+```yaml
+gateway_tls_cert_src: "{{ playbook_dir }}/files/tls/llm.example.com.crt"
+gateway_tls_key_src: "{{ playbook_dir }}/files/tls/llm.example.com.key"
+```
+
+**Самоподписанный** (по умолчанию, `gateway_tls_self_signed: true`). Выпускается на домен
+(CN и subjectAltName) и подходит для проверки; клиенту нужен `curl -k` или `--cacert`.
+Выпускается один раз: после смены домена удалить старый файл `gateway_tls_cert` на сервере.
+
+**Уже на сервере** (например, certbot настроен отдельно): `gateway_tls_self_signed: false`
+и пути к файлам в `gateway_tls_cert` и `gateway_tls_key`.
+
+Запрос по домену:
+
+```bash
+curl -s https://llm.example.com/v1/models -H "Authorization: Bearer $LLM_API_KEY"
 ```
 
 ## Проверка работоспособности
@@ -174,8 +221,8 @@ curl -s http://127.0.0.1:9400/metrics | grep DCGM_FI_DEV_GPU_UTIL
 ## Пример запроса к API
 
 ```bash
-export LLM_HOST=203.0.113.10
-export LLM_API_KEY=<ключ из vault>
+export LLM_HOST=203.0.113.10                     # IP сервера или домен
+export LLM_API_KEY=<ключ из vault>                 # ansible-vault view group_vars/all/vault.yml
 
 curl -s http://$LLM_HOST/v1/chat/completions \
   -H "Authorization: Bearer $LLM_API_KEY" \
@@ -213,17 +260,33 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-## Проверка без GPU
+## Проверка без GPU (CI)
 
-Без сервера с GPU проверяется сам плейбук: синтаксис, шаблоны, стиль.
+Все, что не зависит от GPU, проверяет CI на GitHub Actions
+([.github/workflows/ci.yml](.github/workflows/ci.yml)) на каждый push:
+
+- **lint**: `yamllint`, `ansible-lint` (профиль production), `--syntax-check`, рендер
+  шаблонов docker compose с переменными из `group_vars` и проверка `docker compose config`.
+- **e2e**: плейбук с тегами `common`, `gateway`, `verify` применяется к одноразовой ВМ
+  раннера (Ubuntu 22.04 и 24.04). Вместо vLLM работает заглушка
+  [tests/mock_vllm.py](tests/mock_vllm.py) с тем же API и проверкой ключа. Три варианта:
+  HTTP, HTTPS с самоподписанным сертификатом, HTTPS со своим сертификатом (ключ зашифрован
+  ansible-vault), плюс прогон на ansible-core 2.16. Проверяются ufw, `nginx -t`, роль
+  `verify` целиком (кроме `nvidia-smi`), 401 без ключа и с чужим ключом, 404 на `/docs` и
+  `/metrics`, 429 при превышении rate limit, редирект на HTTPS, сертификат на домен
+  ([tests/check_gateway.sh](tests/check_gateway.sh)) и то, что повторный прогон ничего
+  не меняет (идемпотентность).
+
+Драйвер, Docker с GPU, vLLM и экспортеры в CI не запускаются: для них нужна GPU.
+
+Линтеры локально:
 
 ```bash
-# Синтаксис плейбука и ролей
-ansible-playbook -i inventory/hosts.example.yml site.yml --syntax-check
-
-# Стиль и лучшие практики
-yamllint .
-ansible-lint site.yml
+pip install -r requirements-dev.txt
+ansible-galaxy collection install -r requirements.yml
+yamllint --strict .
+ansible-lint
+ansible-playbook -i tests/inventory.yml site.yml --syntax-check
 ```
 
 Прогон в check mode (`--check --diff`) ничего не меняет на сервере и показывает, что
@@ -249,7 +312,8 @@ ansible-playbook site.yml --ask-vault-pass --check --diff --tags common
   за 30 секунд, и Ansible без ControlPersist (например, через `ssh.exe` Windows) упирается
   в этот лимит посреди прогона. С ControlPersist можно включить `ssh_ufw_rule: "limit"`.
 - Rate limit и лимит тела запроса в nginx защищают GPU от перегрузки и простого DoS.
-- Доступ к API можно ограничить сетями (`api_allowed_cidrs`), включить TLS (`gateway_tls_enabled`).
+- Доступ к API можно ограничить сетями (`api_allowed_cidrs`) и перевести на HTTPS по домену
+  (раздел «Домен и HTTPS»).
 
 ## Нюансы и диагностика
 
@@ -275,8 +339,8 @@ ansible-playbook site.yml --ask-vault-pass --check --diff --tags common
 
 ## Что улучшить дальше
 
-- **TLS с настоящим сертификатом**: Let's Encrypt (certbot) или сертификат из внутреннего CA
-  вместо самоподписанного.
+- **Let's Encrypt внутри плейбука**: выпуск certbot (webroot) по флагу и продление по таймеру;
+  сейчас сертификат получают отдельно и подключают через `gateway_tls_cert_src`.
 - **Ключи на клиента**: сейчас один общий ключ. Для нескольких команд поставить LiteLLM
   или API-gateway с отдельными ключами, квотами и учетом токенов.
 - **Сбор метрик и алерты**: Prometheus + Grafana (дашборд DCGM, метрики vLLM `/metrics`:
@@ -287,7 +351,10 @@ ansible-playbook site.yml --ask-vault-pass --check --diff --tags common
   (по контейнеру на модель с `vllm_gpus`), Kubernetes с GPU Operator при росте парка.
 - **Быстрый холодный старт**: заранее скачанные модели (локальное зеркало HF или S3),
   чтобы новый сервер не качал веса из интернета.
-- **Тестирование ролей**: Molecule с Docker/Vagrant и прогон в CI (lint, syntax-check, check mode).
+- **Полный прогон в CI**: self-hosted раннер с GPU (или облачная GPU-ВМ на время прогона),
+  чтобы проверять драйвер, Docker с GPU и vLLM, а не только шлюз.
+- **Деплой из CI**: workflow с ручным запуском и подтверждением (GitHub environment),
+  SSH-ключ и пароль vault в секретах.
 - **HGX-серверы**: установка `nvidia-fabricmanager` по флагу, проверка NVLink (`nvidia-smi nvlink -s`).
 - **Обновления без простоя**: rolling-обновление по серверам (`serial: 1`) с выводом узла
   из балансировщика.

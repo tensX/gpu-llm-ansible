@@ -5,10 +5,12 @@
 - name: Проверки после развертывания
   when: not ansible_check_mode
   block:
+    # Тег verify_gpu: в CI без GPU эта задача пропускается (--skip-tags verify_gpu).
     - name: Запустить nvidia-smi на хосте
       ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv
       register: verify_smi
       changed_when: false
+      tags: [verify_gpu]
 
     - name: Ждать готовности vLLM (/health, загрузка модели может идти несколько минут)
       ansible.builtin.uri:
@@ -71,7 +73,7 @@
     - name: Итог проверки
       ansible.builtin.debug:
         msg:
-          - "GPU: {{ verify_smi.stdout_lines[1:] | join('; ') }}"
+          - "GPU: {{ (verify_smi.stdout_lines | default(['', 'не проверялась']))[1:] | join('; ') }}"
           - "Модель: {{ vllm_served_model_name }} ({{ vllm_model }})"
           - "Ответ: {{ verify_chat.json.choices[0].message.content | trim }}"
           - "Токены: {{ verify_chat.json.usage.total_tokens }}"

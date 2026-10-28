@@ -10,10 +10,46 @@
     state: absent
   notify: Reload nginx
 
-- name: Самоподписанный сертификат (если TLS включен и своего нет)
+# Свой сертификат (от CA или Let's Encrypt) копируется с машины, где запускается Ansible.
+# Ключ, зашифрованный ansible-vault, copy расшифровывает сам; diff выключен, чтобы ключ
+# не попал в вывод --diff.
+- name: Свой сертификат TLS
+  ansible.builtin.copy:
+    src: "{{ gateway_tls_cert_src }}"
+    dest: "{{ gateway_tls_cert }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - gateway_tls_enabled | bool
+    - gateway_tls_cert_src | length > 0
+  notify: Reload nginx
+
+- name: Свой ключ TLS
+  ansible.builtin.copy:
+    src: "{{ gateway_tls_key_src }}"
+    dest: "{{ gateway_tls_key }}"
+    owner: root
+    group: root
+    mode: "0600"
+  diff: false
+  when:
+    - gateway_tls_enabled | bool
+    - gateway_tls_key_src | length > 0
+  notify: Reload nginx
+
+- name: Имена для самоподписанного сертификата (домен или имя хоста)
+  ansible.builtin.set_fact:
+    api_gateway_cert_names: >-
+      {{ [ansible_facts['fqdn']] if gateway_server_name | trim in ['', '_'] else gateway_server_name.split() }}
+  when: gateway_tls_enabled | bool
+
+# Выпускается один раз (creates): после смены домена старый файл сертификата удалить.
+- name: Самоподписанный сертификат на домен (если TLS включен и своего нет)
   ansible.builtin.command: >-
     openssl req -x509 -nodes -newkey rsa:2048 -days 365
-    -subj "/CN={{ ansible_fqdn }}"
+    -subj "/CN={{ api_gateway_cert_names | first }}"
+    -addext "subjectAltName=DNS:{{ api_gateway_cert_names | join(',DNS:') }}"
     -keyout {{ gateway_tls_key }}
     -out {{ gateway_tls_cert }}
   args:
@@ -21,6 +57,7 @@
   when:
     - gateway_tls_enabled | bool
     - gateway_tls_self_signed | bool
+    - gateway_tls_cert_src | length == 0
   notify: Reload nginx
 
 - name: Права на ключ TLS
@@ -65,3 +102,8 @@
     name: nginx
     enabled: true
     state: started
+
+# Без этого reload случился бы в конце плейбука, и роль verify на первом прогоне
+# проверяла бы старый конфиг (сайт по умолчанию, который пакет nginx запускает сам).
+- name: Применить конфиг nginx до проверок
+  ansible.builtin.meta: flush_handlers
