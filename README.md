@@ -24,7 +24,7 @@ vLLM в контейнере, закрывает его за nginx с ключо
 | `vllm` | docker compose с образом `vllm/vllm-openai` закрепленной версии, ключ API, кеш HF на томе, `restart: unless-stopped`, healthcheck, порт только на 127.0.0.1 | `vllm` |
 | `api_gateway` | nginx перед vLLM: rate limit, лимит тела запроса, отсечение запросов без ключа, стриминг, опционально HTTPS по домену (свой или самоподписанный сертификат) | `gateway` |
 | `monitoring` | dcgm-exporter (метрики GPU) и node_exporter (метрики хоста), включается флагом | `monitoring` |
-| `verify` | `nvidia-smi`, ожидание `/health`, 401 без ключа, `/v1/models` и тестовый `/v1/chat/completions` через nginx | `verify` |
+| `verify` | ожидание `/health`, `nvidia-smi`, 401 без ключа, `/v1/models` и тестовый `/v1/chat/completions` через nginx | `verify` |
 
 Ключевые решения:
 
@@ -221,11 +221,12 @@ curl -s https://llm.example.com/v1/models -H "Authorization: Bearer $LLM_API_KEY
 
 Роль `verify` выполняется в конце каждого прогона и проверяет цепочку целиком:
 
-1. `nvidia-smi` на хосте видит GPU и драйвер.
-2. `/health` vLLM отвечает 200 (ожидание до 30 минут, пока скачивается и загружается модель).
+1. `/health` vLLM отвечает 200 (ожидание до 30 минут, пока скачивается и загружается модель).
+2. `nvidia-smi` на хосте видит GPU и драйвер, в выводе видна память, занятая моделью.
 3. Запрос без ключа через nginx получает 401.
 4. `/v1/models` через nginx с ключом возвращает модель.
-5. Тестовый `/v1/chat/completions` через nginx возвращает ответ; он выводится в лог прогона.
+5. Тестовый `/v1/chat/completions` через nginx (без размышлений модели) возвращает ответ;
+   он выводится в лог прогона.
 
 Ручная проверка на сервере:
 
