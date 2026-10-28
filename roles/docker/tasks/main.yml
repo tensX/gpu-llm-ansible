@@ -11,14 +11,24 @@
     dest: /etc/apt/keyrings/docker.asc
     mode: "0644"
 
+# Новая инструкция Docker создает docker.sources (формат deb822). Если он уже есть
+# (Docker ставили до нас), второй файл с тем же репозиторием не добавляем.
+- name: Проверить, подключен ли репозиторий Docker в формате deb822
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/docker.sources
+  register: docker_sources_deb822
+
+# Файл пишется целиком (copy, а не apt_repository): так перезаписывается docker.list
+# из старых инструкций с другим ключом, и apt не падает на конфликте Signed-By.
 - name: Репозиторий Docker CE
-  ansible.builtin.apt_repository:
-    repo: >-
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker.list
+    content: >
       deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}
       signed-by=/etc/apt/keyrings/docker.asc]
       https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
-    filename: docker
-    state: present
+    mode: "0644"
+  when: not docker_sources_deb822.stat.exists
 
 - name: Ключ репозитория NVIDIA Container Toolkit
   ansible.builtin.get_url:
@@ -26,14 +36,16 @@
     dest: /etc/apt/keyrings/nvidia-container-toolkit.asc
     mode: "0644"
 
+# То же имя файла, что в инструкции NVIDIA: наш файл заменяет ранее созданный.
 - name: Репозиторий NVIDIA Container Toolkit
-  ansible.builtin.apt_repository:
-    repo: >-
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    content: >
       deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.asc]
       https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
-    filename: nvidia-container-toolkit
-    state: present
+    mode: "0644"
 
+# update_cache без cache_valid_time: репозитории могли только что добавиться.
 - name: Установить Docker CE
   ansible.builtin.apt:
     name: "{{ docker_packages }}"
@@ -69,10 +81,10 @@
 - name: Применить перезапуск Docker до запуска контейнеров
   ansible.builtin.meta: flush_handlers
 
+# Маленький образ CUDA той же версии, что у vLLM. Если драйвер слишком старый для этой
+# версии CUDA, проверка упадет здесь с понятной ошибкой "unsatisfied condition: cuda>=...".
 - name: Проверить доступ к GPU из контейнера
-  ansible.builtin.command: >-
-    docker run --rm --gpus all --entrypoint nvidia-smi
-    {{ vllm_image }}:{{ vllm_image_tag }} -L
+  ansible.builtin.command: docker run --rm --gpus all {{ docker_gpu_test_image }} nvidia-smi -L
   register: docker_gpu_test
   changed_when: false
   when: not ansible_check_mode

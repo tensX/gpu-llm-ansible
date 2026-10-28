@@ -60,7 +60,7 @@
   changed_when: false
   when: not ansible_check_mode
 
-- name: nginx в автозапуске
+- name: Автозапуск nginx
   ansible.builtin.systemd:
     name: nginx
     enabled: true

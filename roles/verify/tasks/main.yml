@@ -5,7 +5,7 @@
 - name: Проверки после развертывания
   when: not ansible_check_mode
   block:
-    - name: nvidia-smi на хосте
+    - name: Запустить nvidia-smi на хосте
       ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv
       register: verify_smi
       changed_when: false

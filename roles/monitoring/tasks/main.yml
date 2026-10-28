@@ -7,7 +7,7 @@
     group: root
     mode: "0750"
 
-- name: docker-compose.yml для экспортеров
+- name: Файл docker-compose.yml для экспортеров
   ansible.builtin.template:
     src: docker-compose.yml.j2
     dest: "{{ monitoring_dir }}/docker-compose.yml"
