@@ -43,8 +43,11 @@ vLLM в контейнере, закрывает его за nginx с ключо
   Если `nvidia-smi` уже работает, роль ничего не ставит и не перезагружает сервер
   (`nvidia_driver_keep_existing: true`). Подходит ли драйвер образу vLLM, проверяет тест
   `nvidia-smi` в контейнере CUDA 13.0 в роли `docker`.
-- **Модель по умолчанию `Qwen/Qwen2.5-1.5B-Instruct`**: маленькая (около 3 ГБ весов),
-  без гейта на Hugging Face, помещается на любую GPU от 8 ГБ. Меняется одной переменной.
+- **Модель по умолчанию `Qwen/Qwen3.8-27B-FP8`**: Qwen3.8-27B в официальной FP8-версии, около
+  31 ГБ весов вместо 56 ГБ в BF16, поэтому помещается на одну GPU от 48 ГБ. Без гейта на
+  Hugging Face. Модель по умолчанию сначала размышляет (thinking): vLLM запущен с
+  `--reasoning-parser qwen3` и отдает размышления отдельным полем `reasoning_content`,
+  выключаются они в запросе (пример ниже). Меняется одной переменной.
 - **vLLM слушает только 127.0.0.1**: единственная точка входа nginx. Ключ проверяет сам vLLM
   (переменная `VLLM_API_KEY`, аналог `--api-key`: так ключ не виден в `ps` и аргументах
   контейнера), nginx дополнительно отбрасывает запросы без заголовка `Authorization`
@@ -61,10 +64,12 @@ vLLM в контейнере, закрывает его за nginx с ключо
 - Ubuntu 22.04 или 24.04 (x86_64). Ubuntu 26.04 можно разрешить через
   `supported_ubuntu_versions`, но на ней плейбук не проверялся.
 - GPU NVIDIA архитектуры Turing и новее (T4, A10, A100, L4, L40S, H100, RTX 30/40/50, Blackwell),
-  от 8 ГБ VRAM для модели по умолчанию. Для Volta и Pascal (V100, P100) задать
-  `nvidia_driver_flavor: "server"`: открытые модули их не поддерживают.
+  от 48 ГБ VRAM для модели по умолчанию (L40S, RTX 6000 Ada, A6000, A100, H100; FP8 нативно
+  на Ada и Hopper). Для карт меньше модель меняется одной переменной (пример ниже).
+  Для Volta и Pascal (V100, P100) задать `nvidia_driver_flavor: "server"`: открытые модули
+  их не поддерживают.
 - Доступ в интернет: репозитории Ubuntu, Docker, NVIDIA, Docker Hub, Hugging Face.
-- 40+ ГБ свободного места (образ vLLM около 10 ГБ, плюс модели).
+- 100+ ГБ свободного места: образ vLLM около 26 ГБ на диске, модель по умолчанию около 31 ГБ.
 - Пользователь с sudo и SSH-доступом по ключу.
 - Secure Boot выключен, либо готовность подписать модуль NVIDIA (иначе драйвер не загрузится).
 
@@ -99,8 +104,9 @@ ansible-vault encrypt group_vars/all/vault.yml
 ansible-playbook site.yml --ask-vault-pass
 ```
 
-Первый прогон занимает 10-20 минут: установка драйвера с перезагрузкой, скачивание образа
-vLLM и модели. Повторный прогон ничего не меняет (идемпотентность) и не перезагружает сервер.
+Первый прогон занимает от 15 минут до часа в зависимости от канала: установка драйвера
+с перезагрузкой, скачивание образа vLLM и модели (около 31 ГБ). Повторный прогон ничего
+не меняет (идемпотентность) и не перезагружает сервер.
 
 Запуск по частям через теги:
 
@@ -128,13 +134,13 @@ ansible-playbook site.yml --ask-vault-pass --skip-tags monitoring
 | `nvidia_mig_disable` | `true` | выключить MIG, если он включен (с перезагрузкой) |
 | `docker_gpu_test_image` | `"nvidia/cuda:13.0.2-base-ubuntu24.04"` | образ для проверки GPU в Docker |
 | `vllm_image_tag` | `"v0.31.0"` | версия образа vLLM |
-| `vllm_model` | `"Qwen/Qwen2.5-1.5B-Instruct"` | модель с Hugging Face |
-| `vllm_served_model_name` | `"qwen2.5-1.5b-instruct"` | имя модели в поле `model` запросов |
+| `vllm_model` | `"Qwen/Qwen3.8-27B-FP8"` | модель с Hugging Face |
+| `vllm_served_model_name` | `"qwen3.8-27b"` | имя модели в поле `model` запросов |
 | `vllm_gpu_memory_utilization` | `0.90` | доля памяти GPU под vLLM |
-| `vllm_max_model_len` | `8192` | максимальная длина контекста |
+| `vllm_max_model_len` | `32768` | максимальная длина контекста |
 | `vllm_tensor_parallel_size` | `1` | число GPU для одной модели |
 | `vllm_gpus` | `"all"` | какие GPU отдать контейнеру (`"0,1"`) |
-| `vllm_extra_args` | `[]` | дополнительные аргументы vLLM, например `["--quantization", "awq"]` |
+| `vllm_extra_args` | `["--reasoning-parser", "qwen3"]` | дополнительные аргументы vLLM |
 | `gateway_port` | `80` | порт nginx |
 | `gateway_server_name` | `"_"` | домен API (`server_name` в nginx); `_` = любое имя и IP |
 | `gateway_tls_enabled` | `false` | включить HTTPS (443) с редиректом с 80 |
@@ -150,13 +156,22 @@ ansible-playbook site.yml --ask-vault-pass --skip-tags monitoring
 | `metrics_allowed_cidrs` | `[]` | откуда разрешен сбор метрик, например `["10.0.5.20/32"]` (пусто = только с самого сервера) |
 | `supported_ubuntu_versions` | `["22.04", "24.04"]` | разрешенные версии Ubuntu |
 
-Пример замены модели на большую с гейтом (нужен `hf_token` в vault):
+Примеры замены модели для отдельного сервера:
 
 ```yaml
-# host_vars/gpu-01.yml
+# host_vars/gpu-01.yml: GPU 80 ГБ, полная BF16-версия той же модели
+vllm_model: "Qwen/Qwen3.8-27B"
+---
+# host_vars/gpu-02.yml: GPU 24 ГБ, модель поменьше без размышлений
+vllm_model: "Qwen/Qwen2.5-7B-Instruct"
+vllm_served_model_name: "qwen2.5-7b-instruct"
+vllm_extra_args: []
+vllm_max_model_len: 16384
+---
+# host_vars/gpu-03.yml: модель с гейтом (нужен hf_token в vault)
 vllm_model: "meta-llama/Llama-3.1-8B-Instruct"
 vllm_served_model_name: "llama-3.1-8b-instruct"
-vllm_max_model_len: 16384
+vllm_extra_args: []
 ```
 
 ## Домен и HTTPS
@@ -207,7 +222,7 @@ curl -s https://llm.example.com/v1/models -H "Authorization: Bearer $LLM_API_KEY
 Роль `verify` выполняется в конце каждого прогона и проверяет цепочку целиком:
 
 1. `nvidia-smi` на хосте видит GPU и драйвер.
-2. `/health` vLLM отвечает 200 (ожидание до 15 минут, пока скачивается и загружается модель).
+2. `/health` vLLM отвечает 200 (ожидание до 30 минут, пока скачивается и загружается модель).
 3. Запрос без ключа через nginx получает 401.
 4. `/v1/models` через nginx с ключом возвращает модель.
 5. Тестовый `/v1/chat/completions` через nginx возвращает ответ; он выводится в лог прогона.
@@ -232,22 +247,28 @@ curl -s http://$LLM_HOST/v1/chat/completions \
   -H "Authorization: Bearer $LLM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "qwen2.5-1.5b-instruct",
+        "model": "qwen3.8-27b",
         "messages": [
           {"role": "system", "content": "Ты полезный ассистент."},
           {"role": "user", "content": "Объясни в двух предложениях, что такое GPU."}
         ],
         "max_tokens": 200,
-        "temperature": 0.7
+        "temperature": 0.7,
+        "chat_template_kwargs": {"enable_thinking": false}
       }' | jq -r '.choices[0].message.content'
 ```
+
+`chat_template_kwargs` выключает размышления, и модель сразу отвечает. Без него она сначала
+размышляет: размышления приходят в поле `reasoning_content`, ответ в `content`, а `max_tokens`
+нужен с запасом.
 
 Стриминг (`"stream": true`) работает через nginx без буферизации:
 
 ```bash
 curl -N http://$LLM_HOST/v1/chat/completions \
   -H "Authorization: Bearer $LLM_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model": "qwen2.5-1.5b-instruct", "stream": true,
+  -d '{"model": "qwen3.8-27b", "stream": true,
+       "chat_template_kwargs": {"enable_thinking": false},
        "messages": [{"role": "user", "content": "Привет!"}]}'
 ```
 
@@ -258,8 +279,9 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://203.0.113.10/v1", api_key="<ключ>")
 resp = client.chat.completions.create(
-    model="qwen2.5-1.5b-instruct",
+    model="qwen3.8-27b",
     messages=[{"role": "user", "content": "Привет!"}],
+    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
 )
 print(resp.choices[0].message.content)
 ```

@@ -10,7 +10,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_KEY = os.environ["VLLM_API_KEY"]
-MODEL = os.environ.get("MOCK_MODEL", "qwen2.5-1.5b-instruct")
+MODEL = os.environ.get("MOCK_MODEL", "qwen3.8-27b")
 PORT = int(os.environ.get("MOCK_PORT", "8000"))
 
 
